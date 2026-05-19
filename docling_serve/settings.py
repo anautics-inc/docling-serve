@@ -1,5 +1,6 @@
 import enum
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -12,6 +13,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 from typing_extensions import Self
+
+_log = logging.getLogger(__name__)
 
 
 class UvicornSettings(BaseSettings):
@@ -65,7 +68,9 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 
         config_path = Path(config_path_str)
         if not config_path.exists():
-            return {}
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}. Fix the environment variable DOCLING_SERVE_CONFIG_FILE or unset it."
+            )
 
         try:
             with open(config_path) as f:
@@ -74,10 +79,17 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
                 elif config_path.suffix == ".json":
                     data = json.load(f)
                 else:
-                    return {}
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+                    raise ValueError(
+                        f"Unsupported config file format: {config_path.suffix}. Only .yaml, .yml, and .json are supported."
+                    )
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"Config file must contain a dictionary/object, got {type(data).__name__}"
+                )
+            return data
+        except Exception as err:
+            _log.error(f"Error parsing the config file {config_path}")
+            raise RuntimeError(f"Failed to parse config file {config_path}") from err
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -213,6 +225,9 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_max_ongoing_requests_per_replica: Optional[int] = None
     eng_ray_upscale_delay_s: float = 30.0
     eng_ray_downscale_delay_s: float = 600.0
+    # None -> use Ray Serve defaults.
+    eng_ray_graceful_shutdown_wait_loop_s: Optional[float] = None
+    eng_ray_graceful_shutdown_timeout_s: Optional[float] = None
     eng_ray_num_cpus_per_actor: float = 1.0
 
     # Fault Tolerance & Retry
@@ -228,6 +243,8 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_task_timeout: Optional[float] = 3600.0
     eng_ray_document_timeout: Optional[float] = 300.0
     eng_ray_redis_operation_timeout: float = 30.0
+    eng_ray_dispatcher_rpc_timeout: float = 5.0
+    eng_ray_liveness_fail_after: float = 90.0
 
     # Health Checks
     eng_ray_enable_heartbeat: bool = True

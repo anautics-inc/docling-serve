@@ -167,6 +167,32 @@ def _to_list_of_strings(input_value: Union[str, list[str]]) -> list[str]:
         raise ValueError("Invalid input: must be a string or a list of strings.")
 
 
+# Plain-text inputs Docling's converter has no dedicated backend for, but which are safe to treat as
+# Markdown (its Markdown backend renders them faithfully as text). This lets a notebook drop a `.txt`
+# note (or a log/readme) and still take it all the way through extract → chunk → index → graph, and
+# render it as an editable digital document — same as every other supported type.
+_TEXT_AS_MARKDOWN_SUFFIXES: frozenset[str] = frozenset(
+    {".txt", ".text", ".log", ".markdown", ".mdown", ".mkd", ".mdtext", ".readme"}
+)
+
+
+def coerce_supported_filename(name: str) -> str:
+    """Rename plain-text uploads Docling can't natively parse so its Markdown backend handles them.
+
+    Docling already supports ``.md`` (and docx/html/csv/xlsx/images/…); only true plain text such as
+    ``.txt`` lacks a backend. We map those to ``.md`` (preserving the original stem) so the file
+    converts instead of being rejected. Names Docling already understands pass through untouched.
+    """
+    if not name:
+        return name
+    dot = name.rfind(".")
+    suffix = name[dot:].lower() if dot >= 0 else ""
+    if suffix in _TEXT_AS_MARKDOWN_SUFFIXES:
+        stem = name[:dot] if dot >= 0 else name
+        return f"{stem}.md"
+    return name
+
+
 # Helper functions to parse inputs coming as Form objects
 def _str_to_bool(value: Union[str, bool]) -> bool:
     if isinstance(value, bool):

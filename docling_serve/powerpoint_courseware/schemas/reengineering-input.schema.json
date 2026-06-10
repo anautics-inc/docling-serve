@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PowerPoint Courseware Reengineering Input",
+  "type": "object",
+  "required": ["artifactKind", "flaggedSlides"],
+  "properties": {
+    "artifactKind": { "const": "reengineering_input" },
+    "flaggedSlides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["slideId", "issues"],
+        "properties": {
+          "slideId": { "type": "string" },
+          "issues": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "object" }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

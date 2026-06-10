@@ -16,10 +16,17 @@ def get_async_orchestrator() -> BaseOrchestrator:
             DoclingConverterManager,
             DoclingConverterManagerConfig,
         )
+        from docling_jobkit.orchestrators.local import worker as local_worker
         from docling_jobkit.orchestrators.local.orchestrator import (
             LocalOrchestrator,
             LocalOrchestratorConfig,
         )
+
+        from docling_serve.deep_document.export_results import (
+            process_export_results_with_deep_document,
+        )
+
+        local_worker.process_export_results = process_export_results_with_deep_document
 
         local_config = LocalOrchestratorConfig(
             num_workers=docling_serve_settings.eng_loc_num_workers,

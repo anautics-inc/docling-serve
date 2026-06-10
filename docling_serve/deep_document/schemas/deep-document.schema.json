@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://captify.io/schemas/deep-document.schema.json",
+  "title": "Deep Document",
+  "description": "Unified structural extraction object produced by docling-serve deep extraction mode.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "artifactKind",
+    "documentId",
+    "sourceManifestKey",
+    "document",
+    "assets",
+    "canvas"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "artifactKind": { "type": "string", "enum": ["deep_document"] },
+    "documentId": { "type": "string" },
+    "sourceManifestKey": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "source": { "type": "object" },
+    "storage": { "type": "object" },
+    "document": {
+      "type": "object",
+      "required": ["units"],
+      "properties": {
+        "title": { "type": "string" },
+        "unitCount": { "type": "integer", "minimum": 0 },
+        "unitType": { "type": "string" },
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["unitId", "unitType", "content"],
+            "properties": {
+              "unitId": { "type": "string" },
+              "unitType": { "type": "string" },
+              "unitNumber": { "type": "integer" },
+              "title": { "type": "string" },
+              "sourceRefs": { "type": "object" },
+              "render": { "type": "object" },
+              "content": {
+                "type": "object",
+                "required": ["elements"],
+                "properties": {
+                  "elements": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["elementId", "type"],
+                      "properties": {
+                        "elementId": { "type": "string" },
+                        "type": { "type": "string" },
+                        "bbox": { "type": "object" }
+                      }
+                    }
+                  }
+                }
+              },
+              "canvas": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "assets": { "type": "array" },
+    "canvas": { "type": "object" },
+    "rawArtifacts": { "type": "object" },
+    "provenance": { "type": "object" },
+    "errors": { "type": "array" }
+  }
+}

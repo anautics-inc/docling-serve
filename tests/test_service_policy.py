@@ -9,6 +9,7 @@ from docling.datamodel.service.requests import (
 )
 from docling.datamodel.service.targets import InBodyTarget, S3Target
 
+import docling_serve.policy as policy_module
 from docling_serve.datamodel.convert import ConvertDocumentsRequestOptions
 from docling_serve.policy import (
     build_service_policy,
@@ -36,6 +37,50 @@ def test_normalize_convert_options_sets_default_timeout():
     normalized = normalize_convert_options(ConvertDocumentsOptions(), policy)
 
     assert normalized.document_timeout == policy.max_document_timeout
+
+
+def test_build_service_policy_filters_unavailable_ocr_presets(monkeypatch):
+    monkeypatch.setattr(
+        policy_module,
+        "ocr_preset_available",
+        lambda preset, settings: preset != "easyocr",
+    )
+
+    policy = build_service_policy(DoclingServeSettings())
+
+    assert "easyocr" not in policy.allowed_ocr_presets
+
+
+def test_normalize_convert_options_drops_disabled_picture_description_config():
+    policy = build_service_policy(DoclingServeSettings())
+    options = ConvertDocumentsOptions(
+        do_picture_description=False,
+        picture_description_preset="granite_vision",
+    )
+
+    normalized = normalize_convert_options(options, policy)
+    normalized_data = normalized.model_dump()
+
+    assert normalized.picture_description_preset is None
+    assert normalized.picture_description_custom_config is None
+    assert normalized_data["picture_description_local"] is None
+    assert normalized_data["picture_description_api"] is None
+
+
+def test_normalize_convert_options_drops_disabled_picture_description_custom_config():
+    policy = build_service_policy(DoclingServeSettings())
+    options = ConvertDocumentsOptions(
+        do_picture_description=False,
+        picture_description_custom_config={"kind": "stale"},
+    )
+
+    normalized = normalize_convert_options(options, policy)
+    normalized_data = normalized.model_dump()
+
+    assert normalized.picture_description_preset is None
+    assert normalized.picture_description_custom_config is None
+    assert normalized_data["picture_description_local"] is None
+    assert normalized_data["picture_description_api"] is None
 
 
 def test_validate_convert_options_rejects_timeout_above_policy():

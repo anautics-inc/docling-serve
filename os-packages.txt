@@ -6,3 +6,9 @@ leptonica-devel
 libglvnd-glx
 glib2
 openssl-fips-provider
+# poppler-utils provides pdftocairo, used by the schematic extractor to export
+# clean vector SVG from PDF drawings.
+poppler-utils
+# mdbtools provides mdb-export/mdb-schema/mdb-tables, used by the Access (.mdb/
+# .accdb) extractor. Requires EPEL (enabled in the Containerfile).
+mdbtools

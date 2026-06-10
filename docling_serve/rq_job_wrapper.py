@@ -17,7 +17,6 @@ from docling.datamodel.service.sources import FileSource, HttpSource
 from docling.datamodel.service.tasks import TaskType
 from docling_jobkit.convert.chunking import process_chunk_results
 from docling_jobkit.convert.manager import DoclingConverterManager
-from docling_jobkit.convert.results import process_export_results
 from docling_jobkit.datamodel.task import Task
 from docling_jobkit.datamodel.task_meta import TaskStatus
 from docling_jobkit.orchestrators.rq.orchestrator import (
@@ -26,6 +25,9 @@ from docling_jobkit.orchestrators.rq.orchestrator import (
 )
 from docling_jobkit.orchestrators.rq.worker import make_msgpack_safe
 
+from docling_serve.deep_document.export_results import (
+    process_export_results_with_deep_document,
+)
 from docling_serve.rq_instrumentation import extract_trace_context
 
 logger = logging.getLogger(__name__)
@@ -167,7 +169,7 @@ def instrumented_docling_task(  # noqa: C901
                 try:
                     if task.task_type == TaskType.CONVERT:
                         with tracer.start_as_current_span("process_export_results"):
-                            processed_results = process_export_results(
+                            processed_results = process_export_results_with_deep_document(
                                 task=task,
                                 conv_results=conv_results,
                                 work_dir=workdir,

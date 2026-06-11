@@ -1,0 +1,4 @@
+* PROVISIONAL closed-contact model - replace with vendor data
+.subckt SS1023ABLK pole throw
+R1 pole throw 0.05
+.ends

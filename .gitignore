@@ -447,5 +447,10 @@ pip-selfcheck.json
 
 cookies.txt
 
+# Local scratch / source-data drops — never repo material
+tests/trash/
+tests/OneDrive_*.zip
+tests/prototype/out/
+
 # Examples
 /examples/splitted_pdf/*

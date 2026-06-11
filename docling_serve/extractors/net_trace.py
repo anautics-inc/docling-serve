@@ -49,6 +49,11 @@ FREE_END_AMBIGUITY_RATIO = 2.0
 #: Spatial-hash cell size (pt) for the connectivity query grid.
 GRID_CELL_PT = 8.0
 
+#: A wire cluster touching only ONE component is normally symbol artwork and
+#: dropped — unless its total run length reaches this (pt), which marks it as
+#: an off-page net continuing on another sheet (TO/FROM SHEET flag).
+SINGLE_TOUCH_MIN_RUN_PT = 120.0
+
 Pt = tuple[float, float]
 
 
@@ -312,9 +317,20 @@ def trace_nets(
     nets: list[TracedNet] = []
     for members in clusters.values():
         touched: set[int] = set()
+        run_length = 0.0
         for index in members:
             touched.update(pieces[index].touched)
-        if len(touched) < 2:
+            piece = pieces[index]
+            run_length += math.hypot(
+                piece.b[0] - piece.a[0], piece.b[1] - piece.a[1]
+            )
+        if len(touched) < 2 and not (
+            # A substantial run touching ONE component is an off-page net
+            # (continues on another sheet via a TO/FROM SHEET flag) — keep
+            # it so cross-page merging by name can join the halves. Short
+            # single-touch clusters stay dropped (symbol artwork).
+            len(touched) == 1 and run_length >= SINGLE_TOUCH_MIN_RUN_PT
+        ):
             continue
         nets.append(
             TracedNet(

@@ -30,6 +30,7 @@ from docling_serve.deep_document.s3_publisher import (
     upload_tree,
 )
 from docling_serve.extraction.service import assemble_document_bundle
+from docling_serve.extractors import ExtractionContext, select_registry_extractor
 
 if TYPE_CHECKING:
     from docling_jobkit.orchestrators.callback_invoker import CallbackInvoker
@@ -95,6 +96,20 @@ def task_source_dir(task: Task) -> Path | None:
     metadata = getattr(task, "metadata", None) or {}
     raw = metadata.get("deep_source_dir")
     return Path(str(raw)) if raw else None
+
+
+def task_legacy_sources(task: Task) -> dict[str, str]:
+    """Converted -> original filename for LibreOffice-pre-converted uploads.
+
+    Set by the file endpoint when a legacy ``.doc``/``.xls``/``.ppt`` upload was
+    pre-converted to its modern equivalent, so results report the user's
+    original filename.
+    """
+    metadata = getattr(task, "metadata", None) or {}
+    raw = metadata.get("legacy_office_sources")
+    if isinstance(raw, dict):
+        return {str(key): str(value) for key, value in raw.items()}
+    return {}
 
 
 def process_export_results_with_deep_document(
@@ -174,7 +189,7 @@ def process_export_results_with_deep_document(
 
     if progress:
         progress("extracting")
-    assemble_bundles(
+    manifests = assemble_bundles(
         conv_results=conv_results_list,
         raw_dir=raw_dir,
         output_dir=output_dir,
@@ -183,7 +198,15 @@ def process_export_results_with_deep_document(
         profile=task_profile(task),
         enhancements=task_enhancements(task),
         progress=progress,
+        original_names=task_legacy_sources(task),
     )
+
+    # Documents docling could not convert but a registry extractor bundled
+    # natively (e.g. an Access DB via mdbtools) count as succeeded.
+    recovered = max(0, len(manifests) - num_succeeded)
+    if recovered:
+        num_succeeded += recovered
+        num_failed = max(0, num_failed - recovered)
 
     if not any(output_dir.iterdir()):
         raise RuntimeError("No documents were exported.")
@@ -292,22 +315,34 @@ def assemble_bundles(
     profile: str = "default",
     enhancements: list[str] | None = None,
     progress: Any | None = None,
+    original_names: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Assemble one standard bundle per successfully converted document.
+    """Assemble one standard bundle per extractable document.
 
-    A single-document upload (the notebook case) writes the bundle at the prefix
-    root; multi-document tasks nest each bundle under the source stem. The
-    ``progress`` sink (single-document case only — multi-doc stages would
-    interleave) is handed to the extractor so domain stages stream live.
+    A document is extractable when docling converted it successfully OR a
+    registry extractor reads the source natively without docling (e.g. an
+    Access DB via mdbtools) — the gate is "an extractor produced units", not
+    ``ConversionStatus.SUCCESS``. A single-document upload (the notebook case)
+    writes the bundle at the prefix root; multi-document tasks nest each bundle
+    under the source stem. The ``progress`` sink (single-document case only —
+    multi-doc stages would interleave) is handed to the extractor so domain
+    stages stream live. ``original_names`` maps converted -> original filename
+    for LibreOffice-pre-converted legacy uploads.
     """
-    succeeded = [
+    eligible = [
         conv_res
         for conv_res in conv_results
-        if conv_res.status == ConversionStatus.SUCCESS and conv_res.document is not None
+        if (
+            conv_res.status == ConversionStatus.SUCCESS
+            and conv_res.document is not None
+        )
+        or registry_extractor_owns(
+            conv_res, task_id=task_id, source_dir=source_dir, profile=profile
+        )
     ]
-    single = len(succeeded) == 1
+    single = len(eligible) == 1
     manifests: list[dict[str, Any]] = []
-    for conv_res in succeeded:
+    for conv_res in eligible:
         source_path = Path(str(conv_res.input.file))
         bundle_dir = output_dir if single else output_dir / source_path.stem
         manifest = assemble_document_bundle(
@@ -321,6 +356,35 @@ def assemble_bundles(
             profile=profile,
             enhancements=enhancements,
             progress=progress if single else None,
+            original_name=(original_names or {}).get(source_path.name),
         )
         manifests.append(manifest)
     return manifests
+
+
+def registry_extractor_owns(
+    conv_res: Any,
+    *,
+    task_id: str,
+    source_dir: Path | None,
+    profile: str,
+) -> bool:
+    """True when a non-docling registry extractor owns this document.
+
+    Lets bundle assembly accept sources docling skipped or failed (no backend)
+    that an extractor reads natively from the raw bytes. Extractors that need
+    a docling conversion (``requires_docling``) never recover a failed one.
+    """
+    source_path = Path(str(conv_res.input.file))
+    probe = ExtractionContext(
+        source_path=source_path,
+        bundle_dir=source_path.parent,
+        media_dir=source_path.parent,
+        source_manifest_key=f"task:{task_id}:{source_path.stem}",
+        task_id=task_id,
+        profile=profile,
+        conv_res=conv_res,
+        source_dir=source_dir,
+    )
+    extractor = select_registry_extractor(probe)
+    return extractor is not None and not extractor.requires_docling

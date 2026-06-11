@@ -1,0 +1,29 @@
+{
+  "_source": "Lixie Clock schematic (EasyEDA, Robins Air Force, 2019-06-18), hand-labeled from the drawing print at 300 dpi — significant components only",
+  "partial": true,
+  "components": [
+    {"refDes": "U1", "type": "Regulator", "partNumber": "LT1117-3.3", "location": null},
+    {"refDes": "U2", "type": "Microcontroller", "partNumber": "PIC16LF1719-I/PT-ND", "location": null},
+    {"refDes": "U3", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U4", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U5", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U6", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U7", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U8", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "U10", "type": "Transistor Array", "partNumber": "MMPQ3904", "location": null},
+    {"refDes": "SW1", "type": "Switch", "partNumber": "SRB22AFBNN", "location": null},
+    {"refDes": "SW2", "type": "Switch", "partNumber": "PS1023ABLK", "location": null},
+    {"refDes": "SW3", "type": "Switch", "partNumber": "PS1023ABLK", "location": null},
+    {"refDes": "SW4", "type": "Switch", "partNumber": "PS1023ABLK", "location": null},
+    {"refDes": "SW5", "type": "Switch", "partNumber": "PS1023ABLK", "location": null},
+    {"refDes": "SW6", "type": "Switch", "partNumber": "PS1023ABLK", "location": null},
+    {"refDes": "BUZZER1", "type": "Buzzer", "partNumber": "AI-3035-TWT-3V-R", "location": null},
+    {"refDes": "LED26", "type": "LED", "partNumber": "CL-287S-WS-D-T", "location": null},
+    {"refDes": "C1", "type": "Capacitor", "partNumber": null, "location": null},
+    {"refDes": "C3", "type": "Capacitor", "partNumber": null, "location": null},
+    {"refDes": "R26", "type": "Resistor", "partNumber": null, "location": null},
+    {"refDes": "R40", "type": "Resistor", "partNumber": null, "location": null},
+    {"refDes": "R44", "type": "Resistor", "partNumber": null, "location": null}
+  ],
+  "nets": []
+}

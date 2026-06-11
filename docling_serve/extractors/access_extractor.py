@@ -48,6 +48,8 @@ def mdbtools_available() -> bool:
 
 class AccessExtractor(Extractor):
     name = "extract_access"
+    # Reads the database natively via mdbtools; docling never converts it.
+    requires_docling = False
 
     def supports(self, ctx: ExtractionContext) -> bool:
         if ctx.source_path.suffix.lower() in ACCESS_SUFFIXES:

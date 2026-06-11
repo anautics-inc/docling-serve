@@ -22,6 +22,7 @@ import re
 import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from typing import Any
 
 from defusedxml.common import DefusedXmlException
 
@@ -36,7 +37,10 @@ XLINK_HREF = "{http://www.w3.org/1999/xlink}href"
 PT_TO_MM = 25.4 / 72.0
 
 #: KiCad 8.0 schematic file format version.
-KICAD_SCH_VERSION = 20231120
+#: Schema version token matching what KiCad 10 (eeschema 10.0) writes when it
+#: saves — taken from a real eeschema-rewritten file so generated documents
+#: are first-class current-format citizens, not "older version" imports.
+KICAD_SCH_VERSION = 20260306
 
 #: Stroke width (mm) for paths that carry no usable stroke width of their own.
 DEFAULT_STROKE_WIDTH_MM = 0.15
@@ -532,6 +536,295 @@ def _shape_to_sexpr(shape: _Shape) -> str | None:
     return (
         f'  (polyline (pts {xy}) {stroke} {fill} (uuid "{uuid.uuid4()}"))'
     )
+
+
+#: KiCad renders embedded bitmaps at 300 DPI when scale is 1.0.
+KICAD_IMAGE_BASE_DPI = 300.0
+
+#: Endpoints closer than this (pt) count as one junction point.
+_JUNCTION_TOLERANCE_PT = 1.5
+
+
+def net_label_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
+    """KiCad ``(label …)`` items naming each net ON its wire.
+
+    A label bound to the copper is how KiCad carries net identity through
+    edits — rename, drag, extend, and the netlist still says A8B22. Placed
+    at the midpoint of the net's longest segment (guaranteed on-wire).
+    """
+    items: list[str] = []
+    for net in nets:
+        if not isinstance(net, dict) or not net.get("name"):
+            continue
+        if net.get("page") not in (None, page_no):
+            continue
+        segments = [
+            s
+            for s in net.get("segments") or []
+            if isinstance(s, (list, tuple)) and len(s) == 4
+        ]
+        if not segments:
+            continue
+        longest = max(
+            segments, key=lambda s: (s[2] - s[0]) ** 2 + (s[3] - s[1]) ** 2
+        )
+        mx = (float(longest[0]) + float(longest[2])) / 2 * PT_TO_MM
+        my = (float(longest[1]) + float(longest[3])) / 2 * PT_TO_MM
+        name = str(net["name"]).replace("\\", "\\\\").replace('"', '\\"')
+        items.append(
+            f'  (label "{name}" (at {_fmt(mx)} {_fmt(my)} 0) '
+            f"(effects (font (size 1.27 1.27)) (justify left bottom)) "
+            f'(uuid "{uuid.uuid4()}"))'
+        )
+    return items
+
+
+def junction_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
+    """KiCad ``(junction …)`` dots where three or more wire ends meet.
+
+    Junction dots are how a schematic asserts T-connections; without them
+    KiCad renders bare crossings and edits can silently split nets.
+    """
+    items: list[str] = []
+    for net in nets:
+        if not isinstance(net, dict):
+            continue
+        if net.get("page") not in (None, page_no):
+            continue
+        counts: dict[tuple[float, float], int] = {}
+        for segment in net.get("segments") or []:
+            if not (isinstance(segment, (list, tuple)) and len(segment) == 4):
+                continue
+            for px, py in ((segment[0], segment[1]), (segment[2], segment[3])):
+                key = (
+                    round(float(px) / _JUNCTION_TOLERANCE_PT),
+                    round(float(py) / _JUNCTION_TOLERANCE_PT),
+                )
+                counts[key] = counts.get(key, 0) + 1
+        for (kx, ky), count in counts.items():
+            if count < 3:
+                continue
+            mx = kx * _JUNCTION_TOLERANCE_PT * PT_TO_MM
+            my = ky * _JUNCTION_TOLERANCE_PT * PT_TO_MM
+            items.append(
+                f"  (junction (at {_fmt(mx)} {_fmt(my)}) (diameter 0) "
+                f'(color 0 0 0 0) (uuid "{uuid.uuid4()}"))'
+            )
+    return items
+
+
+def component_annotation_sexprs(
+    components: list[dict[str, Any]], *, page_no: int
+) -> list[str]:
+    """Component outlines + designator text as KiCad graphic items.
+
+    Extracted components aren't yet symbol instances (that needs symbol
+    libraries), but their boxes and printed identities belong in the
+    editable document so an engineer editing in KiCad sees WHAT each region
+    is and can replace it with a real symbol.
+    """
+    items: list[str] = []
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component.get("page") not in (None, page_no):
+            continue
+        bbox = component.get("bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            continue
+        x0, y0, x1, y1 = (float(v) * PT_TO_MM for v in bbox)
+        items.append(
+            f"  (rectangle (start {_fmt(x0)} {_fmt(y0)}) (end {_fmt(x1)} {_fmt(y1)}) "
+            f"(stroke (width 0.127) (type dash) (color 132 0 132 1)) "
+            f'(fill (type none)) (uuid "{uuid.uuid4()}"))'
+        )
+        caption = " ".join(
+            str(part)
+            for part in (component.get("refDes"), component.get("partNumber"))
+            if part
+        ) or str(component.get("description") or component.get("type") or "")
+        if caption:
+            caption = caption.replace("\\", "\\\\").replace('"', '\\"')
+            items.append(
+                f'  (text "{caption}" (at {_fmt(x0)} {_fmt(max(0.0, y0 - 1.0))} 0) '
+                f"(effects (font (size 1.27 1.27)) (justify left bottom)) "
+                f'(uuid "{uuid.uuid4()}"))'
+            )
+    return items
+
+
+
+#: Vector exports with fewer polylines than this are considered empty (a
+#: scanned drawing's only "geometry" is the page frame) and get the raster
+#: page embedded so KiCad still opens the drawing as a tracing backdrop.
+MIN_VECTOR_SHAPES = 5
+
+
+def raster_image_sexpr(
+    png_bytes: bytes, *, dpi: float, width_px: int, height_px: int
+) -> str:
+    """A standard KiCad ``(image ...)`` token holding one page render.
+
+    Positioned so the bitmap covers the page from the origin at true physical
+    size (KiCad assumes 300 DPI at scale 1.0, so scale corrects the render
+    DPI).
+    """
+    import base64
+
+    scale = KICAD_IMAGE_BASE_DPI / dpi
+    center_x_mm = width_px / dpi * 25.4 / 2
+    center_y_mm = height_px / dpi * 25.4 / 2
+    b64 = base64.b64encode(png_bytes).decode("ascii")
+    chunks = "\n      ".join(
+        f'"{b64[i : i + 76]}"' for i in range(0, len(b64), 76)
+    )
+    return (
+        f"  (image (at {_fmt(center_x_mm)} {_fmt(center_y_mm)}) "
+        f"(scale {_fmt(scale)})\n"
+        f'    (uuid "{uuid.uuid4()}")\n'
+        f"    (data\n      {chunks}\n    )\n"
+        f"  )"
+    )
+
+
+def net_wires_sexpr(nets: list[Any], *, page_no: int) -> list[str]:
+    """Real KiCad ``(wire ...)`` objects from a page's traced net segments.
+
+    Geometry replay alone produces graphics (``polyline``) and bitmaps —
+    KiCad treats those as decoration, so a drawing FULL of wires opened with
+    zero electrical wire objects. Each traced segment becomes an actual wire
+    in the exact shape eeschema 10 saves: selectable, draggable, and counted
+    by netlist tooling. Segments are page-pt (y-down); KiCad wants mm in the
+    same orientation. Duplicates collapse (drawings stroke spans twice).
+    """
+    seen: set[tuple[float, float, float, float]] = set()
+    items: list[str] = []
+    for net in nets:
+        if not isinstance(net, dict):
+            continue
+        if net.get("page") not in (None, page_no):
+            continue
+        for segment in net.get("segments") or []:
+            if not (isinstance(segment, (list, tuple)) and len(segment) == 4):
+                continue
+            key = tuple(round(float(v), 2) for v in segment)
+            if key in seen:
+                continue
+            seen.add(key)
+            x1, y1, x2, y2 = (float(v) * PT_TO_MM for v in segment)
+            items.append(
+                f"  (wire (pts (xy {_fmt(x1)} {_fmt(y1)}) (xy {_fmt(x2)} {_fmt(y2)})) "
+                f'(stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))'
+            )
+    return items
+
+
+def inject_items(kicad_text: str, items: list[str]) -> str:
+    """Insert top-level items into a ``.kicad_sch`` document body."""
+    if not items:
+        return kicad_text
+    body = "\n".join(items)
+    marker = "  (sheet_instances"
+    if marker in kicad_text:
+        return kicad_text.replace(marker, body + "\n" + marker, 1)
+    return kicad_text.rstrip()[:-1] + body + "\n)\n"
+
+
+def embed_raster_page(
+    kicad_text: str, png_bytes: bytes, *, dpi: float, width_px: int, height_px: int
+) -> str:
+    """Insert a page-render image into an existing ``.kicad_sch`` document."""
+    image = raster_image_sexpr(png_bytes, dpi=dpi, width_px=width_px, height_px=height_px)
+    return inject_items(kicad_text, [image])
+
+
+def raster_page_to_kicad_sch(
+    png_bytes: bytes,
+    *,
+    dpi: float,
+    width_px: int,
+    height_px: int,
+    title: str | None = None,
+) -> str:
+    """A ``.kicad_sch`` whose only content is the embedded page render.
+
+    Used when a drawing has no vector geometry at all (scanned source) so the
+    KiCad artifact still exists and opens to the actual drawing.
+    """
+    width_mm = width_px / dpi * 25.4
+    height_mm = height_px / dpi * 25.4
+    lines: list[str] = []
+    lines.append("(kicad_sch")
+    lines.append(f"  (version {KICAD_SCH_VERSION})")
+    lines.append('  (generator "docling_serve_schematic_extractor")')
+    lines.append('  (generator_version "1.0")')
+    lines.append(f'  (uuid "{uuid.uuid4()}")')
+    lines.append(f'  (paper "User" {_fmt(width_mm)} {_fmt(height_mm)})')
+    if title:
+        escaped = title.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'  (title_block (title "{escaped}"))')
+    lines.append("  (lib_symbols)")
+    lines.append(
+        raster_image_sexpr(png_bytes, dpi=dpi, width_px=width_px, height_px=height_px)
+    )
+    lines.append('  (sheet_instances (path "/" (page "1")))')
+    lines.append(")")
+    return "\n".join(lines) + "\n"
+
+
+#: Root-page layout for hierarchy sheets (mm): box size and grid spacing.
+_SHEET_BOX_W_MM = 70.0
+_SHEET_BOX_H_MM = 30.0
+_SHEET_GAP_MM = 12.0
+_SHEET_MARGIN_MM = 20.0
+_SHEETS_PER_ROW = 3
+
+
+def hierarchy_root_sexpr(page_files: list[str], *, title: str | None = None) -> str:
+    """A root ``.kicad_sch`` linking each page file as a hierarchical sheet.
+
+    Multi-page drawings export one KiCad document per page; without a root,
+    KiCad sees disconnected files and cross-page nets never join in its
+    netlister. The root lays a sheet symbol per page (grid layout on an A3
+    sheet), so opening it loads the WHOLE drawing as one hierarchy and
+    "next sheet" navigation works as engineers expect.
+    """
+    root_uuid = uuid.uuid4()
+    lines: list[str] = []
+    lines.append("(kicad_sch")
+    lines.append(f"  (version {KICAD_SCH_VERSION})")
+    lines.append('  (generator "docling_serve_schematic_extractor")')
+    lines.append('  (generator_version "1.0")')
+    lines.append(f'  (uuid "{root_uuid}")')
+    lines.append('  (paper "A3")')
+    if title:
+        escaped = title.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'  (title_block (title "{escaped}"))')
+    lines.append("  (lib_symbols)")
+    for index, page_file in enumerate(page_files):
+        column = index % _SHEETS_PER_ROW
+        row = index // _SHEETS_PER_ROW
+        x = _SHEET_MARGIN_MM + column * (_SHEET_BOX_W_MM + _SHEET_GAP_MM)
+        y = _SHEET_MARGIN_MM + row * (_SHEET_BOX_H_MM + _SHEET_GAP_MM)
+        sheet_uuid = uuid.uuid4()
+        name = f"Page {index + 1}"
+        lines.append(
+            f"  (sheet (at {_fmt(x)} {_fmt(y)}) "
+            f"(size {_fmt(_SHEET_BOX_W_MM)} {_fmt(_SHEET_BOX_H_MM)})\n"
+            "    (stroke (width 0.1524) (type solid)) (fill (color 0 0 0 0.0))\n"
+            f'    (uuid "{sheet_uuid}")\n'
+            f'    (property "Sheetname" "{name}" (at {_fmt(x)} {_fmt(y - 0.8)} 0)\n'
+            "      (effects (font (size 1.27 1.27)) (justify left bottom)))\n"
+            f'    (property "Sheetfile" "{page_file}" '
+            f"(at {_fmt(x)} {_fmt(y + _SHEET_BOX_H_MM + 0.8)} 0)\n"
+            "      (effects (font (size 1.27 1.27)) (justify left top)))\n"
+            '    (instances (project ""\n'
+            f'      (path "/{root_uuid}" (page "{index + 2}"))))\n'
+            "  )"
+        )
+    lines.append('  (sheet_instances (path "/" (page "1")))')
+    lines.append(")")
+    return "\n".join(lines) + "\n"
 
 
 def svg_to_kicad_sch(svg_text: str, *, title: str | None = None) -> str:

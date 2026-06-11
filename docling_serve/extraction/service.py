@@ -80,6 +80,7 @@ def assemble_document_bundle(
     profile: str = "default",
     enhancements: list[str] | None = None,
     progress: Any | None = None,
+    original_name: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the standard bundle for one document into ``bundle_dir``.
 
@@ -88,7 +89,9 @@ def assemble_document_bundle(
     the registry for ``(profile, source_path, conv_res)``. Opt-in ``enhancements``
     (e.g. ``image_context``) then enrich the document in place. ``raw_dir`` holds
     docling's exported files (``<stem>.md`` / ``.html`` / images). Returns the
-    ``extraction.json`` manifest dict (also written to disk).
+    ``extraction.json`` manifest dict (also written to disk). ``original_name``
+    is the user's upload name when the source was pre-converted (legacy Office
+    via LibreOffice) so the manifest reports the original filename.
     """
     bundle_dir.mkdir(parents=True, exist_ok=True)
     media_dir = bundle_dir / "media"
@@ -156,7 +159,7 @@ def assemble_document_bundle(
         "profile": profile,
         "enhancements": list(ctx.enhancements),
         "source": {
-            "originalFileName": source_path.name,
+            "originalFileName": original_name or source_path.name,
             "fileKind": source_kind(source_path.name),
         },
         "extractor": result.extractor,
@@ -170,6 +173,8 @@ def assemble_document_bundle(
         "artifacts": [*result.artifacts, *enhancement_artifacts],
         "counts": {"units": len(units), "media": len(media_files)},
     }
+    if original_name and original_name != source_path.name:
+        manifest["source"]["convertedFileName"] = source_path.name
     notes = [*result.notes, *enhancement_notes]
     if notes:
         manifest["notes"] = notes

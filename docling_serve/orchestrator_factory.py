@@ -25,8 +25,12 @@ def get_async_orchestrator() -> BaseOrchestrator:
         from docling_serve.deep_document.export_results import (
             process_export_results_with_deep_document,
         )
+        from docling_serve.extraction.chunk_results import (
+            process_chunk_results_with_extractors,
+        )
 
         local_worker.process_export_results = process_export_results_with_deep_document
+        local_worker.process_chunk_results = process_chunk_results_with_extractors
 
         local_config = LocalOrchestratorConfig(
             num_workers=docling_serve_settings.eng_loc_num_workers,

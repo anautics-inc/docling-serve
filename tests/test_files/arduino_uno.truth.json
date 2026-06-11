@@ -1,0 +1,19 @@
+{
+  "_source": "Arduino UNO Rev3e schematic (UNO-TH_Rev3e), hand-labeled from the drawing print at 3x render — significant components only",
+  "partial": true,
+  "components": [
+    {"refDes": "U1", "type": "IC", "partNumber": "NCP1117ST50T3G", "location": null},
+    {"refDes": "U3", "type": "IC", "partNumber": "ATMEGA16U2-MU(R)", "location": null},
+    {"refDes": "ZU4", "type": "IC", "partNumber": "ATMEGA328P-PU", "location": null},
+    {"refDes": "U5A", "type": "Op-Amp", "partNumber": "LMV358IDGKR", "location": null},
+    {"refDes": "X1", "type": "Connector", "partNumber": "POWERSUPPLY_DC21MMX", "location": null},
+    {"refDes": "D1", "type": "Diode", "partNumber": "M7", "location": null},
+    {"refDes": "D2", "type": "Diode", "partNumber": "CD1206-S01575", "location": null},
+    {"refDes": "F1", "type": "Fuse", "partNumber": "MF-MSMF050-2", "location": null},
+    {"refDes": "Z2", "type": "Varistor", "partNumber": "CG0603MLC-05E", "location": null},
+    {"refDes": "R2", "type": "Resistor", "partNumber": null, "location": null},
+    {"refDes": "L2", "type": "Inductor", "partNumber": null, "location": null},
+    {"refDes": "C5", "type": "Capacitor", "partNumber": null, "location": null}
+  ],
+  "nets": []
+}

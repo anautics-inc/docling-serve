@@ -101,6 +101,13 @@ class Extractor(ABC):
     #: Stable identifier reported in ``extraction.json`` (``extractor`` field).
     name: str = "extractor"
 
+    #: False for extractors that read the source bytes natively and never need
+    #: a docling :class:`ConversionResult` (e.g. Access via mdbtools). These
+    #: extractors keep working when docling cannot convert the source at all,
+    #: so the chunk pipeline and bundle assembly accept their results even when
+    #: the docling conversion failed or was skipped.
+    requires_docling: bool = True
+
     @abstractmethod
     def supports(self, ctx: ExtractionContext) -> bool:
         """True when this extractor should handle ``ctx``."""

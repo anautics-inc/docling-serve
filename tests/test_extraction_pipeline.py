@@ -40,6 +40,8 @@ from docling_serve.extractors.schematic_extractor import (
     _scale_bboxes_to_pt,
 )
 
+FIXTURES = Path(__file__).parent / "test_files"
+
 
 def _ctx(tmp_path: Path, name: str, *, profile: str = "default", **kw) -> ExtractionContext:
     bundle = tmp_path / "bundle"
@@ -320,6 +322,752 @@ def test_normalize_graph_prefers_traced_nets_and_recovers_names():
     unnamed = next(n for n in graph["nets"] if n["name"] is None)
     assert {node["component"] for node in unnamed["nodes"]} == {ids["R1"], "U9"}
     validate_artifact(graph, "schematic-graph.schema.json")
+
+
+# --------------------------------------------------------------------------- #
+# EDML export                                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_graph_to_edml_components_grounds_wires():
+    from docling_serve.extractors.edml import graph_to_edml
+
+    graph = {
+        "components": [
+            {
+                "id": "C0001",
+                "refDes": "V1",
+                "type": "valve",
+                "value": "GUN CHARGING VALVE",
+                "partNumber": "KIDDE 870929",
+                "location": "RH SIDE STA 21",
+                "pins": [{"name": "PIN A"}, {"name": "PIN B"}],
+            },
+            {"id": "C0002", "refDes": "E1", "type": "ground stud"},
+        ],
+        "nets": [
+            {
+                "id": "N1",
+                "name": "A8B22",
+                "gauge": "22 AWG",
+                "signalType": "control",
+                "nodes": [
+                    {"component": "C0001", "pin": "PIN A"},
+                    {"component": "C0002", "pin": None},
+                ],
+            }
+        ],
+    }
+    edml = graph_to_edml(graph, source_name="fixture.pdf")
+    assert 'Component V1 | Name="GUN CHARGING VALVE", "Location" = "RH SIDE STA 21", "PartNumber" = "KIDDE 870929"' in edml
+    assert 'Cavity 1 | Name="PIN A";' in edml
+    assert "Join A.PIN A -> W1;" in edml
+    assert "Eyelet E1" in edml
+    assert "Join 1 -> W1;" in edml
+    assert 'Wire W1 | Name="A8B22", "Gauge" = "22 AWG", "SignalType" = "control";' in edml
+    assert edml.endswith("// End of EDML\n")
+
+
+# --------------------------------------------------------------------------- #
+# Wire-label adoption (scanned drawings' OCR text layer)                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_wire_id_candidates_normalizes_ocr_confusions():
+    from docling_serve.extractors.schematic_extractor import _wire_id_candidates
+
+    assert _wire_id_candidates("A68A2ON") == ["A68A20N"]  # O -> 0
+    assert _wire_id_candidates("AI9CI8") == ["A19C18"]  # I -> 1
+    assert _wire_id_candidates("A -A8C22") == ["A8C22"]  # junk prefix
+    assert _wire_id_candidates("A8A22 -0") == ["A8A22"]  # junk suffix
+    assert _wire_id_candidates("A33") == ["A33"]  # short station wire
+    assert _wire_id_candidates("VALVE") == []
+    assert _wire_id_candidates("R H SIDE") == []
+    assert _wire_id_candidates("MONITORED") == []  # word, not an id, despite O/I subs
+    assert _wire_id_candidates("") == []
+
+
+def test_adopt_wire_labels_names_nearest_segment():
+    from docling_serve.extractors.schematic_extractor import _adopt_wire_labels
+
+    nets = [
+        {"name": None, "segments": [[100.0, 300.0, 400.0, 300.0]]},
+        {"name": None, "segments": [[100.0, 500.0, 400.0, 500.0]]},
+        {"name": "KEEP", "segments": [[0.0, 0.0, 10.0, 0.0]]},
+    ]
+    labels = [
+        (200.0, 292.0, 240.0, 299.0, "A8B22"),  # sits just above net 0
+        (200.0, 495.0, 250.0, 505.0, "AI9CI8"),  # OCR-mangled, on net 1
+        (700.0, 700.0, 720.0, 710.0, "A7A22"),  # far from everything
+    ]
+    assert _adopt_wire_labels(nets, labels) == 2
+    assert nets[0]["name"] == "A8B22"
+    assert nets[1]["name"] == "A19C18"
+    assert nets[2]["name"] == "KEEP"
+
+
+# --------------------------------------------------------------------------- #
+# Raster wire extraction (scanned drawings)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _synthetic_scan_png() -> bytes:
+    """A 800x600 'scan': two thin wires, a thick frame, a red annotation box,
+    and a text label sitting on the horizontal wire."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (800, 600), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((10, 10, 790, 590), outline=(0, 0, 0), width=8)  # page frame
+    draw.line((100, 300, 450, 300), fill=(0, 0, 0), width=2)  # H wire
+    draw.line((400, 150, 400, 450), fill=(0, 0, 0), width=2)  # V wire (< border span)
+    draw.rectangle((150, 150, 350, 250), outline=(220, 30, 30), width=4)  # annotation
+    draw.text((250, 290), "A8B22", fill=(0, 0, 0))  # label ON the wire
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_raster_wire_polylines_extracts_wires_drops_frame_and_annotation():
+    from docling_serve.extractors.raster_lines import raster_wire_polylines
+
+    # Page pt == px for a simple 1:1 mapping.
+    polylines = raster_wire_polylines(
+        _synthetic_scan_png(),
+        page_size_pt=(800, 600),
+        text_boxes_pt=[(245, 285, 310, 305)],
+    )
+    horizontals = [p for p in polylines if abs(p[0][1] - p[1][1]) < 3 and abs(p[0][1] - 300) < 6]
+    verticals = [p for p in polylines if abs(p[0][0] - p[1][0]) < 3 and abs(p[0][0] - 400) < 6]
+    assert horizontals, "horizontal wire not extracted"
+    assert verticals, "vertical wire not extracted"
+    # The thick page frame and the red annotation box must NOT come through.
+    for poly in polylines:
+        (x0, y0), (x1, y1) = poly
+        assert max(abs(x1 - x0), abs(y1 - y0)) < 0.65 * 800
+        assert not (140 < x0 < 360 and 140 < y0 < 260 and abs(y1 - y0) < 5 and abs(y0 - 150) < 8)
+
+
+def test_raster_wire_polylines_handles_garbage_input():
+    from docling_serve.extractors.raster_lines import raster_wire_polylines
+
+    assert raster_wire_polylines(b"not a png", page_size_pt=(100, 100)) == []
+    assert raster_wire_polylines(_synthetic_scan_png(), page_size_pt=(0, 0)) == []
+
+
+# --------------------------------------------------------------------------- #
+# Scanned-drawing fallbacks (raster KiCad backdrop, model-net adequacy)        #
+# --------------------------------------------------------------------------- #
+
+
+def test_raster_page_to_kicad_sch_embeds_standard_image_token():
+    import io
+
+    from PIL import Image
+
+    from docling_serve.extractors.kicad_sch import raster_page_to_kicad_sch
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (400, 300), (255, 255, 255)).save(buffer, format="PNG")
+    text = raster_page_to_kicad_sch(
+        buffer.getvalue(), dpi=200, width_px=400, height_px=300, title="scan"
+    )
+    assert text.startswith("(kicad_sch")
+    assert "(image (at" in text
+    assert "(scale 1.5)" in text  # 300 base dpi / 200 render dpi
+    assert '(data\n      "' in text
+    assert '(sheet_instances (path "/" (page "1")))' in text
+
+
+def test_tracing_adequacy_rejects_frame_only_traces():
+    from docling_serve.extractors.net_trace import TracedNet
+    from docling_serve.extractors.schematic_extractor import _tracing_adequate
+
+    model_nets = [
+        {"nodes": [{"refDes": f"C{i}"}, {"refDes": f"C{i + 1}"}]} for i in range(10)
+    ]
+    # A scan: two junk traces from the page frame vs 20 model memberships.
+    junk = [TracedNet(components=["C1", "C2"], segments=[], attachments={})]
+    assert _tracing_adequate(junk, model_nets) is False
+    # A vector drawing: traces cover most of what the model saw.
+    rich = [
+        TracedNet(components=[f"C{i}", f"C{i + 1}"], segments=[], attachments={})
+        for i in range(8)
+    ]
+    assert _tracing_adequate(rich, model_nets) is True
+    assert _tracing_adequate(junk, []) is True  # nothing to fall back to
+
+
+# --------------------------------------------------------------------------- #
+# KBL export (VDA 4964 — the EE Vision interchange path)                       #
+# --------------------------------------------------------------------------- #
+
+_KBL_SAMPLE_GRAPH = {
+    "titleBlock": {"title": "Gun Charging", "drawingNumber": "MSX-001", "revision": "A"},
+    "components": [
+        {
+            "id": "C0001",
+            "refDes": "V1",
+            "type": "valve",
+            "partNumber": "KIDDE 870929",
+            "location": "RH SIDE STA 21",
+            "pins": [{"number": "A", "name": "PIN A"}, {"number": "B", "name": "PIN B"}],
+        },
+        {"id": "C0002", "refDes": "K1", "type": "relay", "pins": [{"number": "1"}, {"number": "2"}]},
+        {"id": "C0003", "refDes": "E1", "type": "ground stud"},
+    ],
+    "nets": [
+        {
+            "id": "N1",
+            "name": "A8B22",
+            "gauge": "22 AWG",
+            "signalType": "control",
+            "nodes": [{"component": "C0001", "pin": "B"}, {"component": "C0002", "pin": "1"}],
+        },
+        {
+            "id": "N2",
+            "name": "GND",
+            "nodes": [{"component": "C0001", "pin": "A"}],  # single-ended: no Connection
+        },
+    ],
+}
+
+
+def test_graph_to_kbl_is_schema_valid():
+    """The generated KBL must validate against the OFFICIAL prostep/VDA XSD —
+    this is the conformance gate for the EE Vision import path (EE Vision
+    converts KBL into its native EDB model)."""
+    from lxml import etree
+
+    from docling_serve.extractors.kbl import graph_to_kbl
+
+    kbl_text = graph_to_kbl(_KBL_SAMPLE_GRAPH, source_name="fixture.pdf")
+    schema = etree.XMLSchema(etree.parse(str(FIXTURES / "KBL24_SR1.xsd")))
+    document = etree.fromstring(kbl_text.encode())
+    assert schema.validate(document), [str(e) for e in schema.error_log[:5]]
+
+
+def test_graph_to_kbl_maps_connectivity():
+    from lxml import etree
+
+    from docling_serve.extractors.kbl import graph_to_kbl
+
+    kbl_text = graph_to_kbl(_KBL_SAMPLE_GRAPH, source_name="fixture.pdf")
+    document = etree.fromstring(kbl_text.encode())
+    harness = document.find("Harness")
+    connectors = harness.findall("Connector_occurrence")
+    assert [c.findtext("Id") for c in connectors] == ["V1", "K1", "E1"]
+    connections = harness.findall("Connection")
+    assert len(connections) == 1  # the single-ended GND exports no connection
+    assert connections[0].findtext("Signal_name") == "A8B22"
+    extremities = connections[0].findall("Extremities")
+    assert len(extremities) == 2
+    wire_occurrences = harness.findall("General_wire_occurrence")
+    assert len(wire_occurrences) == 2  # every net keeps its wire occurrence
+    assert connections[0].findtext("Wire") == wire_occurrences[0].get("id")
+
+
+def test_net_wires_sexpr_match_eeschema_save_format():
+    from docling_serve.extractors.kicad_sch import net_wires_sexpr
+
+    nets = [
+        {
+            "page": 1,
+            "segments": [[100.0, 200.0, 300.0, 200.0], [100.0, 200.0, 300.0, 200.0]],
+        },
+        {"page": 2, "segments": [[1.0, 1.0, 2.0, 2.0]]},  # other page: excluded
+    ]
+    wires = net_wires_sexpr(nets, page_no=1)
+    assert len(wires) == 1  # duplicate span collapses; page 2 excluded
+    # eeschema 10 wire shape: pts in mm, default stroke, uuid.
+    assert wires[0].startswith("  (wire (pts (xy ")
+    assert "(stroke (width 0) (type default))" in wires[0]
+    assert '(uuid "' in wires[0]
+
+
+def test_net_wires_sexpr_emits_real_kicad_wires():
+    """Traced net segments must become electrical (wire …) objects — not
+    graphics — so KiCad recognizes the drawing's lines as wires."""
+    from docling_serve.extractors.kicad_sch import inject_items, net_wires_sexpr
+
+    nets = [
+        {"id": "N1", "page": 1, "segments": [[72.0, 72.0, 144.0, 72.0]]},
+        {"id": "N2", "page": 2, "segments": [[0.0, 0.0, 10.0, 0.0]]},  # other page
+        {"id": "N3", "segments": []},  # model net without geometry
+    ]
+    wires = net_wires_sexpr(nets, page_no=1)
+    assert len(wires) == 1
+    assert "(wire (pts (xy 25.4 25.4) (xy 50.8 25.4))" in wires[0]
+    assert "(stroke (width 0) (type default))" in wires[0]
+
+    doc = '(kicad_sch\n  (lib_symbols)\n  (sheet_instances (path "/" (page "1")))\n)\n'
+    injected = inject_items(doc, wires)
+    assert injected.count("(wire (pts") == 1
+    assert injected.index("(wire") < injected.index("(sheet_instances")
+
+
+def test_kicad_cli_roundtrip_opens_generated_schematic(tmp_path):
+    """REAL tool validation: KiCad itself must parse and plot our .kicad_sch."""
+    import shutil as _shutil
+    import subprocess
+
+    if not _shutil.which("kicad-cli"):
+        pytest.skip("kicad-cli not installed")
+    from docling_serve.extractors.kicad_sch import svg_to_kicad_sch
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" '
+        'viewBox="0 0 100 100"><path d="M10 10 L90 10 L90 90" '
+        'stroke="#000" fill="none"/></svg>'
+    )
+    sch = tmp_path / "generated.kicad_sch"
+    sch.write_text(svg_to_kicad_sch(svg, title="roundtrip"))
+    result = subprocess.run(
+        ["kicad-cli", "sch", "export", "svg", "--output", str(tmp_path), str(sch)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "generated.svg").exists()
+
+
+# --------------------------------------------------------------------------- #
+# SPICE export (simulation; KiCad/ngspice + Altair SpiceVision family)         #
+# --------------------------------------------------------------------------- #
+
+
+def test_graph_to_spice_maps_primitives_and_subckts():
+    from docling_serve.extractors.spice import graph_to_spice
+
+    graph = {
+        "titleBlock": {"title": "Gun Charging"},
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor", "value": "10k"},
+            {
+                "id": "C2",
+                "refDes": "V1",
+                "type": "valve",
+                "partNumber": "KIDDE 870929",
+                "pins": [{"number": "A"}, {"number": "B"}],
+            },
+            {"id": "C3", "refDes": "K1", "type": "relay", "partNumber": "LEACH 9089-73P"},
+        ],
+        "nets": [
+            {
+                "id": "N1",
+                "name": "A8B22",
+                "nodes": [{"component": "C1"}, {"component": "C2"}],
+            },
+            {"id": "N2", "name": "GND", "nodes": [{"component": "C2"}, {"component": "C3"}]},
+        ],
+    }
+    spice = graph_to_spice(graph, source_name="navair.pdf")
+    assert spice.startswith("* Gun Charging")
+    assert "RR1 A8B22" in spice  # primitive with printed value
+    assert "10k" in spice
+    # No vendor model -> typed electromechanicals get INFERRED first-order
+    # physics (valve -> solenoid coil, relay -> relay coil), clearly labelled.
+    assert "XV1 A8B22 GND INF_KIDDE_870929_2P" in spice  # both memberships as nodes
+    assert ".subckt INF_KIDDE_870929_2P p1 p2" in spice
+    assert "* INFERRED: solenoid coil winding as series R+L" in spice
+    assert ".subckt INF_LEACH_9089_73P_2P" in spice
+    assert spice.rstrip().endswith(".end")
+
+
+def test_graph_to_spice_parses_in_ngspice(tmp_path):
+    """REAL simulator validation: ngspice must accept the netlist syntax."""
+    import shutil as _shutil
+    import subprocess
+
+    if not _shutil.which("ngspice"):
+        pytest.skip("ngspice not installed")
+    from docling_serve.extractors.spice import graph_to_spice
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor", "value": "10k"},
+            {"id": "C2", "refDes": "V1", "type": "valve", "pins": [{"number": "A"}, {"number": "B"}]},
+        ],
+        "nets": [
+            {"id": "N1", "name": "A8B22", "nodes": [{"component": "C1", "pin": None}, {"component": "C2", "pin": None}]},
+        ],
+    }
+    netlist = graph_to_spice(graph, source_name="fixture.pdf")
+    # Syntax gate: elaborate + list the circuit, no analysis required. A
+    # parse failure (bad element, unknown subckt) surfaces as "Error:".
+    checked = netlist.replace(
+        ".end\n", ".control\nlisting e\nquit\n.endc\n.end\n"
+    )
+    circuit = tmp_path / "test.cir"
+    circuit.write_text(checked)
+    result = subprocess.run(
+        ["ngspice", "-b", str(circuit)], capture_output=True, text=True, timeout=60
+    )
+    combined = (result.stdout + result.stderr).lower()
+    assert result.returncode == 0, combined[:400]
+    assert "error:" not in combined.replace("no error", ""), combined[:400]
+    assert "xv1" in combined  # the subckt instance survived elaboration
+
+
+def test_spice_inference_tiers():
+    """Type-driven first-order physics: the inferred tier of model resolution."""
+    from docling_serve.extractors.spice_inference import infer_subckt_body
+
+    # Switch -> closed contact.
+    body = infer_subckt_body({"type": "toggle switch"}, 2)
+    assert body is not None and body.lines == ("R1 p1 p2 10m",)
+    # Lamp honours the printed value.
+    body = infer_subckt_body({"type": "indicator lamp", "value": "47"}, 2)
+    assert body is not None and body.lines == ("R1 p1 p2 47",)
+    assert "printed value" in body.rationale
+    # Diode requires a .model card.
+    body = infer_subckt_body({"type": "diode"}, 2)
+    assert body is not None and body.lines == ("D1 p1 p2 DGEN",)
+    # 3-pin transistor maps positionally.
+    body = infer_subckt_body({"type": "NPN transistor"}, 3)
+    assert body is not None and "QGENNPN" in body.lines[0]
+    # Pin-count mismatch -> no inference (mis-wiring would be silent).
+    assert infer_subckt_body({"type": "relay"}, 6) is None
+    assert infer_subckt_body({"type": "NPN transistor"}, 2) is None
+    # Unknown internals stay un-inferred.
+    assert infer_subckt_body({"type": "microcontroller"}, 22) is None
+    assert infer_subckt_body({"type": "connector"}, 2) is None
+    assert infer_subckt_body({}, 2) is None
+
+
+def test_graph_to_spice_inferred_models_parse_in_ngspice(tmp_path):
+    """Inferred bodies (coil, contact, diode, transistor) elaborate in ngspice."""
+    import shutil as _shutil
+    import subprocess
+
+    if not _shutil.which("ngspice"):
+        pytest.skip("ngspice not installed")
+    from docling_serve.extractors.spice import graph_to_spice
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "K1", "type": "relay"},
+            {"id": "C2", "refDes": "S1", "type": "switch"},
+            {"id": "C3", "refDes": "DS1", "type": "lamp", "value": "28"},
+            {"id": "C4", "refDes": "CR1", "type": "diode"},
+            {"id": "C5", "refDes": "Q1", "type": "NPN transistor"},
+        ],
+        "nets": [
+            {"id": "N1", "name": "BUS", "nodes": [
+                {"component": "C1"}, {"component": "C2"}, {"component": "C3"},
+                {"component": "C4"}, {"component": "C5"},
+            ]},
+            {"id": "N2", "name": "GND", "nodes": [
+                {"component": "C1"}, {"component": "C2"}, {"component": "C3"},
+                {"component": "C4"}, {"component": "C5"},
+            ]},
+            {"id": "N3", "name": "BASE", "nodes": [{"component": "C5"}]},
+        ],
+    }
+    netlist = graph_to_spice(graph, source_name="inferred.pdf")
+    assert "* INFERRED" in netlist
+    assert ".model DGEN D()" in netlist
+    assert ".model QGENNPN NPN(BF=100)" in netlist
+    checked = netlist.replace(".end\n", ".control\nlisting e\nquit\n.endc\n.end\n")
+    circuit = tmp_path / "inferred.cir"
+    circuit.write_text(checked)
+    result = subprocess.run(
+        ["ngspice", "-b", str(circuit)], capture_output=True, text=True, timeout=60
+    )
+    combined = (result.stdout + result.stderr).lower()
+    assert result.returncode == 0, combined[:400]
+    assert "error:" not in combined.replace("no error", ""), combined[:400]
+    assert "xk1" in combined and "xq1" in combined
+
+
+# --------------------------------------------------------------------------- #
+# Catalog-driven SPICE model binding                                           #
+# --------------------------------------------------------------------------- #
+
+
+def _model_library(tmp_path):
+    """A synthetic vendor-model library keyed by normalized part number."""
+    library = tmp_path / "spice-models"
+    library.mkdir()
+    (library / "KIDDE_870929.lib").write_text(
+        "* solenoid coil model (test fixture)\n"
+        ".subckt KIDDE870929 coil_a coil_b\n"
+        "L1 coil_a mid 50m\n"
+        "R1 mid coil_b 28\n"
+        ".ends\n"
+    )
+    return library
+
+
+def test_find_model_resolves_by_normalized_part_number(tmp_path):
+    from docling_serve.extractors.spice_models import find_model
+
+    library = _model_library(tmp_path)
+    model = find_model("KIDDE 870929", library_dir=library)
+    assert model is not None
+    assert model.name == "KIDDE870929"
+    assert model.pin_count == 2
+    assert model.is_subckt
+    # Punctuation/case drift in the printed number still resolves.
+    assert find_model("kidde-870929", library_dir=library) is not None
+    assert find_model("UNKNOWN-1", library_dir=library) is None
+    assert find_model(None, library_dir=library) is None
+
+
+def test_graph_to_spice_binds_vendor_models(tmp_path, monkeypatch):
+    from docling_serve.extractors.spice import graph_to_spice
+
+    library = _model_library(tmp_path)
+    monkeypatch.setenv("DOCLING_SERVE_SPICE_MODEL_DIR", str(library))
+    graph = {
+        "components": [
+            {
+                "id": "C1",
+                "refDes": "V1",
+                "type": "valve",
+                "partNumber": "KIDDE 870929",
+                "pins": [{"number": "A"}, {"number": "B"}],
+            },
+            {"id": "C2", "refDes": "K1", "type": "relay", "partNumber": "NOMODEL-1"},
+            {"id": "C3", "refDes": "J1", "type": "connector", "partNumber": "CONN-9"},
+        ],
+        "nets": [
+            {"id": "N1", "name": "A8B22", "nodes": [{"component": "C1", "pin": None}, {"component": "C2", "pin": None}]},
+            {"id": "N2", "name": "GND", "nodes": [{"component": "C2"}, {"component": "C3"}]},
+        ],
+    }
+    spice = graph_to_spice(graph, source_name="fixture.pdf")
+    assert "XV1 A8B22 NC_V1_1 KIDDE870929" in spice  # tier 1: vendor model bound
+    assert ".subckt KIDDE870929 coil_a coil_b" in spice  # model text inlined
+    assert ".subckt INF_NOMODEL_1_2P" in spice  # tier 2: relay physics inferred
+    assert ".subckt SC_CONN_9_2P" in spice  # tier 3: connector keeps its stub
+
+    import shutil as _shutil
+    import subprocess
+
+    if _shutil.which("ngspice"):
+        checked = spice.replace(".end\n", ".control\nlisting e\nquit\n.endc\n.end\n")
+        circuit = tmp_path / "bound.cir"
+        circuit.write_text(checked)
+        result = subprocess.run(
+            ["ngspice", "-b", str(circuit)], capture_output=True, text=True, timeout=60
+        )
+        combined = (result.stdout + result.stderr).lower()
+        assert result.returncode == 0, combined[:400]
+        assert "error:" not in combined.replace("no error", ""), combined[:400]
+
+
+# --------------------------------------------------------------------------- #
+# XML export                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_graph_to_xml_full_round_trip():
+    import xml.etree.ElementTree as ET
+
+    from docling_serve.extractors.xml_export import graph_to_xml
+
+    graph = {
+        "confidence": 0.9,
+        "titleBlock": {"title": "Lixie Clock", "drawingNumber": "MSX-001", "revision": "A"},
+        "pages": [{"pageNumber": 1}],
+        "components": [
+            {
+                "id": "C0001",
+                "refDes": "V1",
+                "type": "valve",
+                "partNumber": "BDP-000002",
+                "location": "RH SIDE STA 21",
+                "page": 1,
+                "bbox": [100, 150, 290, 260],
+                "pins": [{"name": "PIN A", "status": "connected"}, {"name": "PIN B"}],
+            },
+        ],
+        "nets": [
+            {
+                "id": "N1",
+                "name": "A8B22",
+                "gauge": "22 AWG",
+                "signalType": "signal",
+                "page": 1,
+                "nodes": [{"component": "C0001", "pin": "PIN B", "attachment": [295.4, 190.0]}],
+                "segments": [[295.4, 190.0, 450.0, 190.0]],
+            }
+        ],
+    }
+    xml_text = graph_to_xml(graph, source_name="fixture.pdf")
+    assert xml_text.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+
+    root = ET.fromstring(xml_text)
+    assert root.tag == "schematic"
+    assert root.get("source") == "fixture.pdf"
+    assert root.find("titleBlock/title").text == "Lixie Clock"
+    component = root.find("components/component")
+    assert component.get("refDes") == "V1"
+    assert component.get("partNumber") == "BDP-000002"
+    assert component.find("bbox").get("x1") == "290"
+    assert [p.get("name") for p in component.findall("pins/pin")] == ["PIN A", "PIN B"]
+    net = root.find("nets/net")
+    assert net.get("name") == "A8B22"
+    node = net.find("node")
+    assert node.get("pin") == "PIN B"
+    assert node.get("x") == "295.4"
+    assert net.find("segments/segment").get("x2") == "450.0"
+
+
+# --------------------------------------------------------------------------- #
+# Off-page (cross-sheet) net runs                                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_trace_nets_keeps_long_single_component_run_drops_short_artwork():
+    """A long run touching one component is an off-page net (continues on
+    another sheet); short single-touch clusters remain dropped as artwork."""
+    from docling_serve.extractors.net_trace import ComponentBox, trace_nets
+
+    boxes = [ComponentBox(ref="K1", x0=100, y0=100, x1=200, y1=200)]
+    long_run = [(200.0, 150.0), (500.0, 150.0)]  # 300 pt to the border
+    short_artwork = [(210.0, 190.0), (230.0, 190.0)]  # 20 pt squiggle
+    nets = trace_nets([long_run, short_artwork], boxes)
+    assert len(nets) == 1
+    assert nets[0].components == ["K1"]
+
+
+# --------------------------------------------------------------------------- #
+# Crop-verification of component labels                                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_apply_corrections_rebinds_refdes_and_rewrites_net_refs():
+    from docling_serve.extractors.label_verify import apply_corrections
+
+    result = {
+        "components": [
+            {"refDes": "Z14", "type": "IC", "partNumber": "ATMEGA328P-PU", "bbox": [0, 0, 1, 1]},
+            {"refDes": "U3", "type": "IC", "partNumber": "FT232RB-REEL", "bbox": [2, 0, 3, 1]},
+            {"refDes": "J1", "type": "Connector", "parentComponent": "Z14", "bbox": [4, 0, 5, 1]},
+        ],
+        "nets": [
+            {"name": "XTAL1", "nodes": [{"refDes": "Z14", "pin": "9"}, {"refDes": "U3", "pin": "1"}]}
+        ],
+    }
+    selected = result["components"]
+    verified = {
+        0: {"index": 0, "refDes": "ZU4", "partNumber": "ATMEGA328P-PU"},
+        # Crop shows the TRUE print — the FT232 was knowledge-substitution.
+        1: {"index": 1, "refDes": "U3", "partNumber": "ATMEGA16U2-MU(R)"},
+        # Null part numbers never override (crop may simply miss the label).
+        2: {"index": 2, "refDes": "J1", "partNumber": None},
+    }
+    corrections = apply_corrections(result, verified, selected)
+    assert corrections >= 2
+    assert result["components"][0]["refDes"] == "ZU4"
+    assert result["components"][1]["partNumber"] == "ATMEGA16U2-MU(R)"
+    # Net node references follow the rename, as does parentComponent.
+    assert result["nets"][0]["nodes"][0]["refDes"] == "ZU4"
+    assert result["components"][2]["parentComponent"] == "ZU4"
+
+
+def test_apply_corrections_rejects_implausible_or_colliding_refdes():
+    from docling_serve.extractors.label_verify import apply_corrections
+
+    result = {
+        "components": [
+            {"refDes": "C5", "type": "capacitor", "bbox": [0, 0, 1, 1]},
+            {"refDes": "R2", "type": "resistor", "bbox": [2, 0, 3, 1]},
+            {"refDes": "U1", "type": "IC", "partNumber": "LP2985-33DBVR", "bbox": [4, 0, 5, 1]},
+        ],
+        "nets": [],
+    }
+    selected = result["components"]
+    verified = {
+        0: {"index": 0, "refDes": "100u", "partNumber": "100u"},  # value, not refDes
+        1: {"index": 1, "refDes": "U1", "partNumber": None},  # collides with existing U1
+        2: {"index": 2, "refDes": "AREF", "partNumber": None},  # net label
+    }
+    assert apply_corrections(result, verified, selected) == 0
+    assert [c["refDes"] for c in result["components"]] == ["C5", "R2", "U1"]
+    assert result["components"][2]["partNumber"] == "LP2985-33DBVR"  # null never overrides
+
+
+def test_apply_corrections_crop_adoption_replaces_invented_identity():
+    """When a complete transcribed pair matches NO existing refDes and NO
+    part number, the cropped component adopts it (the whole-page pass invented
+    Q2 where the print says SW2 / PS1023ABLK)."""
+    from docling_serve.extractors.label_verify import apply_corrections
+
+    result = {
+        "components": [
+            {"refDes": "Q2", "type": "transistor", "bbox": [0, 0, 1, 1]},
+        ],
+        "nets": [{"name": "BTN2", "nodes": [{"refDes": "Q2", "pin": "1"}]}],
+    }
+    verified = {0: {"refDes": "SW2", "partNumber": "PS1023ABLK"}}
+    assert apply_corrections(result, verified, result["components"]) == 1
+    component = result["components"][0]
+    assert component["refDes"] == "SW2"
+    assert component["partNumber"] == "PS1023ABLK"
+    assert result["nets"][0]["nodes"][0]["refDes"] == "SW2"
+
+
+def test_apply_corrections_resolves_swap_chains():
+    """IC1→U1 while U1→U3: renames must apply as a simultaneous permutation."""
+    from docling_serve.extractors.label_verify import apply_corrections
+
+    result = {
+        "components": [
+            {"refDes": "IC1", "type": "IC", "partNumber": "NCP1117ST50T3G", "bbox": [0, 0, 1, 1]},
+            {"refDes": "U1", "type": "IC", "partNumber": "ATMEGA16U2-MU(R)", "bbox": [2, 0, 3, 1]},
+        ],
+        "nets": [{"name": "+5V", "nodes": [{"refDes": "IC1", "pin": "2"}, {"refDes": "U1", "pin": "4"}]}],
+    }
+    selected = result["components"]
+    verified = {
+        0: {"index": 0, "refDes": "U1", "partNumber": "NCP1117ST50T3G"},
+        1: {"index": 1, "refDes": "U3", "partNumber": "ATMEGA16U2-MU(R)"},
+    }
+    assert apply_corrections(result, verified, selected) == 2
+    assert [c["refDes"] for c in result["components"]] == ["U1", "U3"]
+    nodes = result["nets"][0]["nodes"]
+    assert [n["refDes"] for n in nodes] == ["U1", "U3"]
+
+
+def test_apply_corrections_displaces_unverified_occupant():
+    """A verified (refDes, part) pair beats the whole-page binding: the
+    component holding ATMEGA16U2 takes the printed name U3 and the unverified
+    occupant of U3 is displaced into the vacated designator."""
+    from docling_serve.extractors.label_verify import apply_corrections
+
+    result = {
+        "components": [
+            {"refDes": "U1", "type": "IC", "partNumber": "ATMEGA16U2-MU(R)", "bbox": [0, 0, 1, 1]},
+            {"refDes": "U3", "type": "IC", "partNumber": "FT232RG-33SSOP", "bbox": [2, 0, 3, 1]},
+        ],
+        "nets": [{"name": "D+", "nodes": [{"refDes": "U1", "pin": "1"}, {"refDes": "U3", "pin": "2"}]}],
+    }
+    verified = {0: {"refDes": "U3", "partNumber": "ATMEGA16U2-MU(R)"}}
+    assert apply_corrections(result, verified, result["components"]) == 2
+    assert [c["refDes"] for c in result["components"]] == ["U3", "U1"]
+    assert [n["refDes"] for n in result["nets"][0]["nodes"]] == ["U3", "U1"]
+
+
+def test_select_components_keeps_significant_boxed_only():
+    from docling_serve.extractors.label_verify import (
+        MAX_VERIFY_COMPONENTS,
+        select_components,
+    )
+
+    components = [{"refDes": f"R{i}", "type": "resistor", "bbox": [0, 0, 1, 1]} for i in range(40)]
+    components.append({"refDes": "U1", "type": "IC", "bbox": [0, 0, 1, 1]})
+    components.append({"refDes": "X9", "type": "capacitor", "partNumber": "PN-1", "bbox": [0, 0, 1, 1]})
+    components.append({"refDes": "NOBOX", "type": "IC"})  # unboxed: skipped
+    selected = select_components(components)
+    assert [c["refDes"] for c in selected] == ["U1", "X9"]  # significant + boxed only
+    ics = [{"refDes": f"U{i}", "type": "IC", "bbox": [0, 0, 1, 1]} for i in range(40)]
+    assert len(select_components(ics)) == MAX_VERIFY_COMPONENTS
 
 
 # --------------------------------------------------------------------------- #
@@ -873,3 +1621,347 @@ def test_usaf_sustainment_profile_template():
     type_desc = cls.model_fields["entities"].annotation.__args__[0].model_fields["type"].description
     for required in ("WeaponSystem", "EndItem", "AssistanceRequest", "ITSystem"):
         assert required in type_desc
+
+
+# --------------------------------------------------------------------------- #
+# Schematic revision (browser edits) + delivery checks                         #
+# --------------------------------------------------------------------------- #
+
+
+def _revision_graph():
+    return {
+        "schemaVersion": "1",
+        "artifactKind": "captify.schematic.v1",
+        "source": {"originalFileName": "fixture.pdf", "fileKind": "schematic"},
+        "model": {"provider": "bedrock", "modelId": "test", "understood": True},
+        "pages": [{"page": 1, "width": 612, "height": 792}],
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor", "value": "10k",
+             "bbox": [10, 10, 30, 20], "page": 1},
+            {"id": "C2", "refDes": "V1", "type": "valve", "partNumber": "WRONG-1",
+             "bbox": [50, 10, 80, 30], "page": 1},
+            {"id": "C3", "refDes": "X9", "type": "artifact", "page": 1},
+        ],
+        "nets": [
+            {"id": "N1", "name": "A8B22", "page": 1,
+             "segments": [[30, 15, 50, 15]],
+             "nodes": [{"component": "C1", "pin": None}, {"component": "C2", "pin": None}]},
+            {"id": "N2", "name": None, "page": 1, "segments": [],
+             "nodes": [{"component": "C3", "pin": None}]},
+        ],
+        "confidence": 0.9,
+        "warnings": [],
+        "notes": [],
+    }
+
+
+def test_apply_graph_edits_updates_deletes_and_bumps_revision():
+    from docling_serve.extractors.schematic_revision import apply_graph_edits
+
+    graph = _revision_graph()
+    applied = apply_graph_edits(graph, {
+        "components": [
+            {"id": "C2", "partNumber": "KIDDE 870929", "refDes": "V2"},
+            {"id": "C3", "delete": True},
+            {"id": "MISSING", "refDes": "nope"},
+        ],
+        "nets": [
+            {"id": "N2", "delete": True},
+            {"id": "N1", "name": "A8B23"},
+        ],
+    })
+    assert applied == {"componentEdits": 1, "componentDeletes": 1,
+                       "netEdits": 1, "netDeletes": 1}
+    assert graph["revision"] == 1
+    ids = [c["id"] for c in graph["components"]]
+    assert ids == ["C1", "C2"]
+    edited = graph["components"][1]
+    assert edited["partNumber"] == "KIDDE 870929" and edited["refDes"] == "V2"
+    assert [n["id"] for n in graph["nets"]] == ["N1"]
+    assert graph["nets"][0]["name"] == "A8B23"
+
+
+def test_graph_integrity_checks_flag_issues():
+    from docling_serve.extractors.schematic_revision import check_graph_integrity
+
+    graph = _revision_graph()
+    results = {c.id: c for c in check_graph_integrity(graph)}
+    assert results["schema"].status == "pass"
+    # C3 has no bbox -> warn; N2 is single-ended -> warn.
+    assert results["components"].status == "warn"
+    assert results["connectivity"].status == "warn"
+    assert results["references"].status == "pass"
+
+    # Delete the artifact + dangling net: everything greens.
+    from docling_serve.extractors.schematic_revision import apply_graph_edits
+
+    apply_graph_edits(graph, {"components": [{"id": "C3", "delete": True}],
+                              "nets": [{"id": "N2", "delete": True}]})
+    results = {c.id: c for c in check_graph_integrity(graph)}
+    assert results["components"].status == "pass"
+    assert results["connectivity"].status == "pass"
+
+
+def test_strip_injected_items_removes_only_electrical_items():
+    from docling_serve.extractors.kicad_sch import (
+        inject_items,
+        net_wires_sexpr,
+        svg_to_kicad_sch,
+    )
+    from docling_serve.extractors.schematic_revision import _strip_injected_items
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" '
+        'viewBox="0 0 100 100"><path d="M 10 10 L 90 10" '
+        'style="fill:none;stroke:#000000;stroke-width:1"/></svg>'
+    )
+    base = svg_to_kicad_sch(svg, title="strip-test")
+    nets = [{"id": "N1", "page": 1, "segments": [[10, 10, 90, 10]], "nodes": []}]
+    injected = inject_items(base, net_wires_sexpr(nets, page_no=1))
+    assert "(wire (pts" in injected
+    stripped = _strip_injected_items(injected)
+    assert "(wire (pts" not in stripped
+    # Geometry replay polyline survives the strip.
+    assert stripped.count("(polyline") == base.count("(polyline")
+    # Idempotent: stripping a clean document changes nothing.
+    assert _strip_injected_items(stripped) == stripped
+
+
+def test_run_delivery_checks_on_generated_artifacts(tmp_path):
+    """End-to-end check suite over real serializer outputs (tool-validated)."""
+    from docling_serve.extractors.edml import graph_to_edml
+    from docling_serve.extractors.kbl import graph_to_kbl
+    from docling_serve.extractors.kicad_sch import (
+        inject_items,
+        net_wires_sexpr,
+        svg_to_kicad_sch,
+    )
+    from docling_serve.extractors.netlist import graph_to_kicad_netlist
+    from docling_serve.extractors.schematic_revision import run_delivery_checks
+    from docling_serve.extractors.spice import graph_to_spice
+    from docling_serve.extractors.xml_export import graph_to_xml
+
+    graph = _revision_graph()
+    (tmp_path / "fixture.net").write_text(graph_to_kicad_netlist(graph, source_name="fixture.pdf"))
+    (tmp_path / "fixture.edml").write_text(graph_to_edml(graph, source_name="fixture.pdf"))
+    (tmp_path / "fixture.xml").write_text(graph_to_xml(graph, source_name="fixture.pdf"))
+    (tmp_path / "fixture.kbl").write_text(graph_to_kbl(graph, source_name="fixture.pdf"))
+    (tmp_path / "fixture.cir").write_text(graph_to_spice(graph, source_name="fixture.pdf"))
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="612pt" height="792pt" '
+        'viewBox="0 0 612 792"><path d="M 30 15 L 50 15" '
+        'style="fill:none;stroke:#000000;stroke-width:1"/></svg>'
+    )
+    base = svg_to_kicad_sch(svg, title="fixture")
+    (tmp_path / "schematic.kicad_sch").write_text(
+        inject_items(base, net_wires_sexpr(graph["nets"], page_no=1))
+    )
+
+    results = {c.id: c for c in run_delivery_checks(graph, tmp_path)}
+    assert results["schema"].status == "pass"
+    assert results["netlist"].status == "pass"
+    assert results["xml"].status == "pass"
+    assert results["kbl"].status in {"pass", "skip"}
+    assert results["kicad"].status in {"pass", "skip"}
+    assert results["spice"].status in {"pass", "skip"}
+    # No fail across the suite for a freshly-generated bundle.
+    assert all(c.status != "fail" for c in results.values()), {
+        k: (v.status, v.detail) for k, v in results.items()
+    }
+
+
+def test_find_model_prefers_tenant_scoped_models(tmp_path):
+    from docling_serve.extractors.spice_models import find_model
+
+    shared = tmp_path / "KIDDE_870929.lib"
+    shared.write_text(".subckt SHARED a b\nR1 a b 1\n.ends\n")
+    tenant_dir = tmp_path / "tenants" / "anautics"
+    tenant_dir.mkdir(parents=True)
+    (tenant_dir / "KIDDE_870929.lib").write_text(".subckt TENANT a b\nR1 a b 2\n.ends\n")
+
+    shared_hit = find_model("KIDDE 870929", library_dir=tmp_path)
+    assert shared_hit is not None and shared_hit.name == "SHARED"
+    tenant_hit = find_model("KIDDE 870929", library_dir=tmp_path, tenant_id="anautics")
+    assert tenant_hit is not None and tenant_hit.name == "TENANT"
+    # Another tenant cannot see anautics' model but still gets the shared one.
+    other = find_model("KIDDE 870929", library_dir=tmp_path, tenant_id="other")
+    assert other is not None and other.name == "SHARED"
+
+
+def test_hierarchy_root_links_pages_and_plots_in_kicad(tmp_path):
+    """Multi-page export gets a root document KiCad opens as one hierarchy."""
+    import shutil as _shutil
+    import subprocess
+    import tempfile
+
+    from docling_serve.extractors.kicad_sch import (
+        hierarchy_root_sexpr,
+        svg_to_kicad_sch,
+    )
+
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100pt" height="100pt" '
+        'viewBox="0 0 100 100"><path d="M 10 10 L 90 10" '
+        'style="fill:none;stroke:#000000;stroke-width:1"/></svg>'
+    )
+    pages = []
+    for index in (1, 2):
+        name = f"schematic-page-{index:03d}.kicad_sch"
+        (tmp_path / name).write_text(svg_to_kicad_sch(svg, title=f"page {index}"))
+        pages.append(name)
+    root = tmp_path / "schematic-root.kicad_sch"
+    root.write_text(hierarchy_root_sexpr(pages, title="multisheet"))
+    text = root.read_text()
+    assert text.count("(sheet (at") == 2
+    assert all(f'"Sheetfile" "{page}"' in text for page in pages)
+
+    if not _shutil.which("kicad-cli"):
+        pytest.skip("kicad-cli not installed")
+    with tempfile.TemporaryDirectory() as out:
+        result = subprocess.run(
+            ["kicad-cli", "sch", "export", "svg", "--output", out, str(root)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert result.returncode == 0, result.stderr[:400]
+        # The hierarchy plots the root AND its subsheets.
+        from pathlib import Path as _P
+
+        produced = sorted(_P(out).glob("*.svg"))
+        assert len(produced) >= 3, [p.name for p in produced]
+
+
+def test_graph_to_spice_wraps_primitive_model_cards(tmp_path, monkeypatch):
+    """A vendor .model card (PMOS) binds through a generated wrapper subckt."""
+    import shutil as _shutil
+    import subprocess
+
+    library = tmp_path / "models"
+    library.mkdir()
+    (library / "IRF9530.lib").write_text(".model IRF9530 PMOS(VTO=-3.7 KP=8)\n")
+    monkeypatch.setenv("DOCLING_SERVE_SPICE_MODEL_DIR", str(library))
+    from docling_serve.extractors.spice import graph_to_spice
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "Q1", "type": "Transistor", "partNumber": "IRF9530"},
+        ],
+        "nets": [
+            {"id": "N1", "name": "D", "nodes": [{"component": "C1"}]},
+            {"id": "N2", "name": "G", "nodes": [{"component": "C1"}]},
+            {"id": "N3", "name": "S", "nodes": [{"component": "C1"}]},
+        ],
+    }
+    spice = graph_to_spice(graph, source_name="fixture.pdf")
+    assert "XQ1 D G S MDL_IRF9530_3P" in spice
+    assert ".subckt MDL_IRF9530_3P p1 p2 p3" in spice
+    assert "M1 p1 p2 p3 p3 IRF9530" in spice  # bulk tied to source
+    assert ".model IRF9530 PMOS" in spice  # vendor card inlined
+
+    if _shutil.which("ngspice"):
+        checked = spice.replace(".end\n", ".control\nlisting e\nquit\n.endc\n.end\n")
+        circuit = tmp_path / "wrapped.cir"
+        circuit.write_text(checked)
+        result = subprocess.run(
+            ["ngspice", "-b", str(circuit)], capture_output=True, text=True, timeout=60
+        )
+        combined = (result.stdout + result.stderr).lower()
+        assert result.returncode == 0, combined[:400]
+        assert "error:" not in combined.replace("no error", ""), combined[:400]
+
+
+# --------------------------------------------------------------------------- #
+# Schematic simulation (classification + real ngspice DC solve)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_classify_schematic_kinds():
+    from docling_serve.extractors.spice_simulation import classify_schematic
+
+    electromech = {"components": [
+        {"type": "Relay"}, {"type": "Valve/Solenoid"}, {"type": "Switch"},
+        {"type": "Fuse"}, {"type": "resistor"},
+    ]}
+    assert classify_schematic(electromech).kind == "electromechanical-power"
+    digital = {"components": [
+        {"type": "IC"}, {"type": "Display"}, {"type": "ic"},
+        {"type": "resistor"}, {"type": "resistor"}, {"type": "capacitor"},
+    ]}
+    assert classify_schematic(digital).kind == "digital-logic"
+    analog = {"components": [{"type": "transistor"}, {"type": "capacitor"}]}
+    assert classify_schematic(analog).kind == "analog-mixed"
+
+
+def test_detect_power_nets_mil_wire_codes_and_rails():
+    from docling_serve.extractors.spice_simulation import detect_power_nets
+
+    graph = {"nets": [
+        {"id": "N1", "name": "28VDC BUS"},
+        {"id": "N2", "name": "A68A20N"},   # MIL-W-5088 ground wire
+        {"id": "N3", "name": "VCC"},
+        {"id": "N4", "name": "GND"},
+        {"id": "N5", "name": "A12C18"},    # plain signal wire
+    ]}
+    supplies, grounds = detect_power_nets(graph)
+    assert {s["net"]: s["volts"] for s in supplies} == {"N1": 28.0, "N3": None}
+    assert grounds == ["N2", "N4"]
+
+
+def test_simulate_graph_solves_a_divider(tmp_path):
+    """Deterministic physics: 28V across two equal coils reads 14V midpoint."""
+    import shutil as _shutil
+
+    if not _shutil.which("ngspice"):
+        pytest.skip("ngspice not installed")
+    from docling_serve.extractors.spice_simulation import simulate_graph
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "K1", "type": "relay"},
+            {"id": "C2", "refDes": "K2", "type": "relay"},
+        ],
+        "nets": [
+            {"id": "N1", "name": "BUS28", "nodes": [{"component": "C1"}]},
+            {"id": "N2", "name": "MID", "nodes": [{"component": "C1"}, {"component": "C2"}]},
+            {"id": "N3", "name": "RTN", "nodes": [{"component": "C2"}]},
+        ],
+    }
+    result = simulate_graph(
+        graph,
+        source_name="divider.pdf",
+        sources=[{"net": "BUS28", "volts": 28}],
+    )
+    # No ground name -> falls back to most-connected... MID has 2 members.
+    # Specify the return explicitly instead for a deterministic reference.
+    graph["nets"][2]["name"] = "GND"
+    result = simulate_graph(
+        graph, source_name="divider.pdf", sources=[{"net": "BUS28", "volts": 28}]
+    )
+    assert result.ok, result.log[-400:]
+    assert abs(result.nodeVoltages.get("bus28", 0) - 28.0) < 0.01
+    assert abs(result.nodeVoltages.get("mid", 0) - 14.0) < 0.05  # equal coils divide
+
+
+def test_symbol_map_uses_iec_style_defaults():
+    """Exported symbols follow IEC 60617 style: KiCad's DEFAULT library symbols
+    (Device:R is the IEC rectangle body), never the ANSI `_US` variants or the
+    `*_IEEE` libraries."""
+    from docling_serve.extractors.kicad_symbols import (
+        TYPE_SYMBOL_MAP,
+        SymbolLibrary,
+        find_symbol_dir,
+    )
+
+    for _token, lib, name, _prefix in TYPE_SYMBOL_MAP:
+        assert not lib.endswith("_IEEE"), f"{lib}:{name} is an IEEE-style library"
+        assert not name.endswith("_US"), f"{lib}:{name} is the ANSI variant"
+
+    symbol_dir = find_symbol_dir()
+    if symbol_dir is None:
+        pytest.skip("KiCad symbol libraries not installed")
+    loaded = SymbolLibrary(symbol_dir).load("Device", "R")
+    assert loaded is not None
+    definition, _pins = loaded
+    # IEC 60617 resistor = rectangle body; the ANSI zigzag has no rectangle.
+    assert "(rectangle" in definition

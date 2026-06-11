@@ -1,0 +1,52 @@
+{
+  "components": [
+    {
+      "refDes": "V1",
+      "type": "valve",
+      "partNumber": "BDP-000002",
+      "location": "RH SIDE STA 21"
+    },
+    {
+      "refDes": "K1",
+      "type": "relay",
+      "partNumber": "BDP-000003",
+      "location": "E-BAY SHELF 2"
+    },
+    {
+      "refDes": "U1",
+      "type": "ECU",
+      "partNumber": "BDP-000005",
+      "location": "FWD AVIONICS"
+    },
+    {
+      "refDes": "E1",
+      "type": "ground stud",
+      "partNumber": null,
+      "location": null
+    }
+  ],
+  "nets": [
+    {
+      "name": "A8B22",
+      "members": [
+        "V1",
+        "K1"
+      ]
+    },
+    {
+      "name": "A9A20",
+      "members": [
+        "K1",
+        "U1"
+      ]
+    },
+    {
+      "name": "GND",
+      "members": [
+        "V1",
+        "U1",
+        "E1"
+      ]
+    }
+  ]
+}

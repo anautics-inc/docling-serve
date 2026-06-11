@@ -1,8 +1,8 @@
 import enum
 import json
-import sys
+import logging
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import yaml
 from pydantic import AnyUrl, Field, field_validator, model_validator
@@ -12,6 +12,8 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 from typing_extensions import Self
+
+_log = logging.getLogger(__name__)
 
 
 class UvicornSettings(BaseSettings):
@@ -25,9 +27,9 @@ class UvicornSettings(BaseSettings):
     root_path: str = ""
     proxy_headers: bool = True
     timeout_keep_alive: int = 60
-    ssl_certfile: Optional[Path] = None
-    ssl_keyfile: Optional[Path] = None
-    ssl_keyfile_password: Optional[str] = None
+    ssl_certfile: Path | None = None
+    ssl_keyfile: Path | None = None
+    ssl_keyfile_password: str | None = None
     workers: Union[int, None] = None
 
 
@@ -65,7 +67,9 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 
         config_path = Path(config_path_str)
         if not config_path.exists():
-            return {}
+            raise FileNotFoundError(
+                f"Config file not found: {config_path}. Fix the environment variable DOCLING_SERVE_CONFIG_FILE or unset it."
+            )
 
         try:
             with open(config_path) as f:
@@ -74,10 +78,17 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
                 elif config_path.suffix == ".json":
                     data = json.load(f)
                 else:
-                    return {}
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+                    raise ValueError(
+                        f"Unsupported config file format: {config_path.suffix}. Only .yaml, .yml, and .json are supported."
+                    )
+            if not isinstance(data, dict):
+                raise ValueError(
+                    f"Config file must contain a dictionary/object, got {type(data).__name__}"
+                )
+            return data
+        except Exception as err:
+            _log.error(f"Error parsing the config file {config_path}")
+            raise RuntimeError(f"Failed to parse config file {config_path}") from err
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -92,14 +103,14 @@ class DoclingServeSettings(BaseSettings):
     )
 
     # Config file support
-    config_file: Optional[Path] = None
+    config_file: Path | None = None
 
     enable_ui: bool = False
     api_host: str = "localhost"
-    log_level: Optional[LogLevel] = None
-    artifacts_path: Optional[Path] = None
-    static_path: Optional[Path] = None
-    scratch_path: Optional[Path] = None
+    log_level: LogLevel | None = None
+    artifacts_path: Path | None = None
+    static_path: Path | None = None
+    scratch_path: Path | None = None
     single_use_results: bool = True
     load_models_at_boot: bool = True
     options_cache_size: int = 2
@@ -114,19 +125,100 @@ class DoclingServeSettings(BaseSettings):
     allow_custom_ocr_config: bool = False
     show_version_info: bool = True
     enable_management_endpoints: bool = False
+    deep_document_s3_bucket: str = ""
+    deep_document_s3_prefix_template: str = "documents/{tenant_id}/docling/{task_id}"
+    deep_document_s3_region: str | None = None
+    deep_document_service_env_file: str = ""
+    # Buckets a caller may target via the ``deep_s3_bucket`` form field. The
+    # server-configured ``deep_document_s3_bucket`` is always allowed implicitly.
+    # When empty, request-supplied buckets that differ from the server default
+    # are rejected (secure default) — this prevents a caller from making the
+    # service write its processed output to an arbitrary bucket using the
+    # service's own AWS credentials (confused-deputy).
+    deep_document_s3_allowed_buckets: list[str] | None = None
+
+    # === LiteLLM proxy (shared LLM transport) ===
+    # All model calls — vision passes and knowledge-graph extraction — route
+    # through the LiteLLM proxy, which fronts Bedrock and owns credentials,
+    # guardrails, usage accounting, and model aliasing. When unset, the vision
+    # provider falls back to the graph_litellm_* values below so one endpoint +
+    # key serves both paths.
+    litellm_base_url: str | None = None
+    litellm_api_key: str | None = None
+
+    # === Model-driven extraction (Bedrock via LiteLLM) ===
+    # When enabled, profile-driven extractors (schematic, drawing) and the
+    # image_context enhancer may call a multimodal model to *understand* a
+    # document rather than relying on hard-coded rules. The model name must be
+    # a LiteLLM proxy alias (or a ``bedrock/...`` wildcard route).
+    bedrock_enabled: bool = False
+    bedrock_vision_model: str = "bedrock-claude-sonnet-4-5"
+    bedrock_max_tokens: int = 8192
+    bedrock_temperature: float = 0.0
+    bedrock_timeout_seconds: float = 120.0
+    bedrock_max_retries: int = 3
+    # Max source pages a model-driven extractor will send to the model per
+    # document (cost/latency guard). Raster DPI for those page images.
+    bedrock_max_pages: int = 8
+    bedrock_render_dpi: int = 200
+    # Max images a single enhancement pass (e.g. image_context) will send to the
+    # model per document.
+    enhancement_max_images: int = 40
+
+    # === Extraction connectors ===
+    # Allow-list of source connectors callers may request via the ``connector``
+    # form field. ``file`` is always available. Empty -> all built-ins allowed.
+    allowed_connectors: list[str] | None = None
+    # Bytes ceiling per Access database / S3 object pulled by a connector.
+    connector_max_object_bytes: int = 512 * 1024 * 1024
+
+    # === Knowledge-graph extraction (docling-graph via LiteLLM) ===
+    # The opt-in ``knowledge_graph`` enhancer runs docling-graph's template-driven
+    # entity+relationship extraction (the AWS Comprehend NER replacement) and routes
+    # the LLM call through the existing LiteLLM proxy, which fronts Bedrock. The
+    # graph is emitted as a ``knowledge-graph.json`` sidecar; the ontology layer
+    # downstream owns persistence (Neo4j/OpenSearch). docling-graph is an optional
+    # dependency — the enhancer degrades gracefully when it is not installed.
+    # base_url/api_key are graph-specific OVERRIDES; unset, the shared
+    # litellm_base_url/litellm_api_key above are used.
+    graph_litellm_base_url: str | None = None
+    graph_litellm_api_key: str | None = None
+    graph_litellm_model: str = "bedrock-claude-sonnet-4-6"
+    # LiteLLM provider hint passed to docling-graph; ``litellm_proxy`` makes
+    # LiteLLM forward ``model`` verbatim to the proxy at ``base_url``.
+    graph_litellm_provider: str = "litellm_proxy"
+    # Dotted import path to the Pydantic template class. None -> built-in generic
+    # entity/relationship template (broad NER + RELATED_TO edges).
+    graph_extraction_template: str | None = None
+    # docling-graph extraction contract: "direct" | "staged" | "delta".
+    graph_extraction_contract: str = "direct"
+    # Schema-enforced response_format. Off by default for broad proxy/model support.
+    graph_extraction_structured_output: bool = False
+    # Upper bound on source characters fed to the graph extractor (cost guard).
+    graph_extraction_max_chars: int = 200_000
+    # LLM response budget for the extraction call. docling-graph cannot resolve
+    # model metadata through a LiteLLM-proxy alias and would fall back to a 4092-token
+    # cap — which truncates the JSON on document-scale extractions and fails the run.
+    # Claude Sonnet on Bedrock supports >=64k output tokens; 32k is a safe budget.
+    graph_extraction_max_output_tokens: int = 32_000
+    # Model context window hint (input side). Same proxy-alias metadata gap as above
+    # (the fallback is 32k); Claude Sonnet's real window is 200k tokens.
+    graph_extraction_context_limit: int = 200_000
 
     api_key: str = ""
 
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
-    max_num_pages: int = sys.maxsize
-    max_file_size: int = sys.maxsize
+    # Finite ceilings (overridable) so a single oversized/zip-bomb document
+    # cannot pin a worker indefinitely. Raise via env if a deployment needs it.
+    max_num_pages: int = 10_000
+    max_file_size: int = 1024 * 1024 * 1024  # 1 GiB
 
     # Threading pipeline
-    queue_max_size: Optional[int] = None
-    ocr_batch_size: Optional[int] = None
-    layout_batch_size: Optional[int] = None
-    table_batch_size: Optional[int] = None
-    batch_polling_interval_seconds: Optional[float] = None
+    queue_max_size: int | None = None
+    ocr_batch_size: int | None = None
+    layout_batch_size: int | None = None
+    table_batch_size: int | None = None
+    batch_polling_interval_seconds: float | None = None
 
     sync_poll_interval: int = 2  # seconds
     max_sync_wait: int = 120  # 2 minutes
@@ -147,23 +239,23 @@ class DoclingServeSettings(BaseSettings):
     eng_rq_results_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_failure_ttl: int = 3_600 * 4  # 4 hours default
     eng_rq_redis_max_connections: int = 50
-    eng_rq_redis_socket_timeout: Optional[float] = None  # Socket timeout in seconds
-    eng_rq_redis_socket_connect_timeout: Optional[float] = (
+    eng_rq_redis_socket_timeout: float | None = None  # Socket timeout in seconds
+    eng_rq_redis_socket_connect_timeout: float | None = (
         None  # Socket connect timeout in seconds
     )
-    eng_rq_redis_gate_concurrency: Optional[int] = None
+    eng_rq_redis_gate_concurrency: int | None = None
     eng_rq_redis_gate_reserved_connections: int = 10
     eng_rq_redis_gate_wait_timeout: float = 0.25
     eng_rq_redis_gate_status_poll_wait_timeout: float = 5.0
     eng_rq_zombie_reaper_interval: float = 300.0
     eng_rq_zombie_reaper_max_age: float = 3600.0
     # KFP engine
-    eng_kfp_endpoint: Optional[AnyUrl] = None
-    eng_kfp_token: Optional[str] = None
-    eng_kfp_ca_cert_path: Optional[str] = None
-    eng_kfp_self_callback_endpoint: Optional[str] = None
-    eng_kfp_self_callback_token_path: Optional[Path] = None
-    eng_kfp_self_callback_ca_cert_path: Optional[Path] = None
+    eng_kfp_endpoint: AnyUrl | None = None
+    eng_kfp_token: str | None = None
+    eng_kfp_ca_cert_path: str | None = None
+    eng_kfp_self_callback_endpoint: str | None = None
+    eng_kfp_self_callback_token_path: Path | None = None
+    eng_kfp_self_callback_ca_cert_path: Path | None = None
 
     eng_kfp_experimental: bool = False
 
@@ -171,9 +263,9 @@ class DoclingServeSettings(BaseSettings):
     # Redis Configuration
     eng_ray_redis_url: str = ""
     eng_ray_redis_max_connections: int = 50
-    eng_ray_redis_socket_timeout: Optional[float] = None
-    eng_ray_redis_socket_connect_timeout: Optional[float] = None
-    eng_ray_redis_gate_concurrency: Optional[int] = None
+    eng_ray_redis_socket_timeout: float | None = None
+    eng_ray_redis_socket_connect_timeout: float | None = None
+    eng_ray_redis_gate_concurrency: int | None = None
     eng_ray_redis_gate_reserved_connections: int = 10
     eng_ray_redis_gate_wait_timeout: float = 0.25
     eng_ray_redis_gate_status_poll_wait_timeout: float = 5.0
@@ -190,19 +282,19 @@ class DoclingServeSettings(BaseSettings):
 
     # Per-User Dispatcher Limits
     eng_ray_max_concurrent_tasks: int = 5
-    eng_ray_max_queued_tasks: Optional[int] = None
+    eng_ray_max_queued_tasks: int | None = None
     eng_ray_enable_queue_limit_rejection: bool = False
-    eng_ray_max_documents: Optional[int] = None
+    eng_ray_max_documents: int | None = None
     eng_ray_enable_document_limits: bool = False
 
     # Ray Configuration
     eng_ray_address: str = ""  # Required - must be set explicitly
     eng_ray_namespace: str = "docling"
-    eng_ray_runtime_env: Optional[dict] = None
+    eng_ray_runtime_env: dict | None = None
 
     # Ray mTLS Configuration
     eng_ray_enable_mtls: bool = False
-    eng_ray_cluster_name: Optional[str] = None
+    eng_ray_cluster_name: str | None = None
 
     # Ray Serve Autoscaling
     eng_ray_min_actors: int = 1
@@ -210,9 +302,12 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_target_requests_per_replica: int = 1
     # Hard cap on concurrent in-flight requests per replica.
     # None -> follow eng_ray_target_requests_per_replica.
-    eng_ray_max_ongoing_requests_per_replica: Optional[int] = None
+    eng_ray_max_ongoing_requests_per_replica: int | None = None
     eng_ray_upscale_delay_s: float = 30.0
     eng_ray_downscale_delay_s: float = 600.0
+    # None -> use Ray Serve defaults.
+    eng_ray_graceful_shutdown_wait_loop_s: float | None = None
+    eng_ray_graceful_shutdown_timeout_s: float | None = None
     eng_ray_num_cpus_per_actor: float = 1.0
 
     # Fault Tolerance & Retry
@@ -225,21 +320,23 @@ class DoclingServeSettings(BaseSettings):
     eng_ray_dispatcher_max_task_retries: int = 3
 
     # Timeouts
-    eng_ray_task_timeout: Optional[float] = 3600.0
-    eng_ray_document_timeout: Optional[float] = 300.0
+    eng_ray_task_timeout: float | None = 3600.0
+    eng_ray_document_timeout: float | None = 300.0
     eng_ray_redis_operation_timeout: float = 30.0
+    eng_ray_dispatcher_rpc_timeout: float = 5.0
+    eng_ray_liveness_fail_after: float = 90.0
 
     # Health Checks
     eng_ray_enable_heartbeat: bool = True
 
     # Resource Management & Memory Monitoring
-    eng_ray_memory_limit_per_actor: Optional[str] = None
-    eng_ray_object_store_memory: Optional[str] = None
+    eng_ray_memory_limit_per_actor: str | None = None
+    eng_ray_object_store_memory: str | None = None
     eng_ray_enable_oom_protection: bool = True
     eng_ray_memory_warning_threshold: float = 0.9
 
     # Scratch Directory
-    eng_ray_scratch_dir: Optional[Path] = None
+    eng_ray_scratch_dir: Path | None = None
 
     # Logging
     eng_ray_log_level: str = "INFO"
@@ -255,54 +352,54 @@ class DoclingServeSettings(BaseSettings):
     otel_service_name: str = "docling-serve"
 
     # Metrics
-    metrics_port: Optional[int] = None
+    metrics_port: int | None = None
 
     # === DoclingConverterManagerConfig Parameters ===
     # TODO: Don't overwrite the default of docling-jobkit. This requires first some restructure in jobkit.
 
     # VLM Pipeline Control
     default_vlm_preset: str = "granite_docling"
-    allowed_vlm_presets: Optional[list[str]] = None
+    allowed_vlm_presets: list[str] | None = None
     custom_vlm_presets: dict[str, Any] = Field(default_factory=dict)
-    allowed_vlm_engines: Optional[list[str]] = None
+    allowed_vlm_engines: list[str] | None = None
 
     # Picture Description Control
     default_picture_description_preset: str = "smolvlm"
-    allowed_picture_description_presets: Optional[list[str]] = None
+    allowed_picture_description_presets: list[str] | None = None
     custom_picture_description_presets: dict[str, Any] = Field(default_factory=dict)
-    allowed_picture_description_engines: Optional[list[str]] = None
+    allowed_picture_description_engines: list[str] | None = None
 
     # Code/Formula Control
     default_code_formula_preset: str = "default"
-    allowed_code_formula_presets: Optional[list[str]] = None
+    allowed_code_formula_presets: list[str] | None = None
     custom_code_formula_presets: dict[str, Any] = Field(default_factory=dict)
-    allowed_code_formula_engines: Optional[list[str]] = None
+    allowed_code_formula_engines: list[str] | None = None
 
     # Picture Classification Control
     default_picture_classification_preset: str = "document_figure_classifier_v2"
-    allowed_picture_classification_presets: Optional[list[str]] = None
+    allowed_picture_classification_presets: list[str] | None = None
     custom_picture_classification_presets: dict[str, Any] = Field(default_factory=dict)
 
     # Table Structure Control
     default_table_structure_kind: str = "docling_tableformer"
-    allowed_table_structure_kinds: Optional[list[str]] = None
+    allowed_table_structure_kinds: list[str] | None = None
     default_table_structure_preset: str = "tableformer_v1_accurate"
-    allowed_table_structure_presets: Optional[list[str]] = None
+    allowed_table_structure_presets: list[str] | None = None
     custom_table_structure_presets: dict[str, Any] = Field(default_factory=dict)
 
     # Layout Control
     default_layout_kind: str = "docling_layout_default"
-    allowed_layout_kinds: Optional[list[str]] = None
+    allowed_layout_kinds: list[str] | None = None
     default_layout_preset: str = "docling_layout_default"
-    allowed_layout_presets: Optional[list[str]] = None
+    allowed_layout_presets: list[str] | None = None
     custom_layout_presets: dict[str, Any] = Field(default_factory=dict)
 
     # OCR Control
     default_ocr_preset: str = "auto"
     default_ocr_kind: str = "auto"
-    allowed_ocr_presets: Optional[list[str]] = None
+    allowed_ocr_presets: list[str] | None = None
     custom_ocr_presets: dict[str, Any] = Field(default_factory=dict)
-    allowed_ocr_kinds: Optional[list[str]] = None
+    allowed_ocr_kinds: list[str] | None = None
 
     @classmethod
     def settings_customise_sources(
@@ -366,10 +463,11 @@ class DoclingServeSettings(BaseSettings):
         "allowed_layout_presets",
         "allowed_ocr_presets",
         "allowed_ocr_kinds",
+        "allowed_connectors",
         mode="before",
     )
     @classmethod
-    def parse_list_from_json_or_csv(cls, v: Any) -> Optional[list[str]]:
+    def parse_list_from_json_or_csv(cls, v: Any) -> list[str] | None:
         """Parse list parameters from JSON arrays or comma-separated strings."""
         if v is None or v == "":
             return None
@@ -390,7 +488,7 @@ class DoclingServeSettings(BaseSettings):
 
     @field_validator("log_level", mode="before")
     @classmethod
-    def validate_log_level(cls, v: Optional[str]) -> Optional[str]:
+    def validate_log_level(cls, v: str | None) -> str | None:
         """Validate and normalize log level to uppercase for case-insensitive support."""
         if v is None:
             return v

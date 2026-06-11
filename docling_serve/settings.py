@@ -137,13 +137,22 @@ class DoclingServeSettings(BaseSettings):
     # service's own AWS credentials (confused-deputy).
     deep_document_s3_allowed_buckets: list[str] | None = None
 
-    # === Model-driven extraction (Amazon Bedrock) ===
-    # When enabled, profile-driven extractors (schematic, drawing) may call a
-    # Bedrock multimodal model to *understand* a document rather than relying on
-    # hard-coded rules. Credentials use the standard boto3 chain.
+    # === LiteLLM proxy (shared LLM transport) ===
+    # All model calls — vision passes and knowledge-graph extraction — route
+    # through the LiteLLM proxy, which fronts Bedrock and owns credentials,
+    # guardrails, usage accounting, and model aliasing. When unset, the vision
+    # provider falls back to the graph_litellm_* values below so one endpoint +
+    # key serves both paths.
+    litellm_base_url: str | None = None
+    litellm_api_key: str | None = None
+
+    # === Model-driven extraction (Bedrock via LiteLLM) ===
+    # When enabled, profile-driven extractors (schematic, drawing) and the
+    # image_context enhancer may call a multimodal model to *understand* a
+    # document rather than relying on hard-coded rules. The model name must be
+    # a LiteLLM proxy alias (or a ``bedrock/...`` wildcard route).
     bedrock_enabled: bool = False
-    bedrock_region: str | None = None  # falls back to deep_document_s3_region/AWS_REGION
-    bedrock_vision_model: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    bedrock_vision_model: str = "bedrock-claude-sonnet-4-5"
     bedrock_max_tokens: int = 8192
     bedrock_temperature: float = 0.0
     bedrock_timeout_seconds: float = 120.0
@@ -170,6 +179,8 @@ class DoclingServeSettings(BaseSettings):
     # graph is emitted as a ``knowledge-graph.json`` sidecar; the ontology layer
     # downstream owns persistence (Neo4j/OpenSearch). docling-graph is an optional
     # dependency — the enhancer degrades gracefully when it is not installed.
+    # base_url/api_key are graph-specific OVERRIDES; unset, the shared
+    # litellm_base_url/litellm_api_key above are used.
     graph_litellm_base_url: str | None = None
     graph_litellm_api_key: str | None = None
     graph_litellm_model: str = "bedrock-claude-sonnet-4-6"

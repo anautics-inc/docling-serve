@@ -75,8 +75,13 @@ def build_graph_config(template_override: str | None = None) -> _GraphConfig | N
     ``template_override`` (a dotted import path) wins over the configured default,
     letting a caller select a domain template per request.
     """
-    base_url = getattr(docling_serve_settings, "graph_litellm_base_url", None)
-    api_key = getattr(docling_serve_settings, "graph_litellm_api_key", None)
+    # Graph-specific override wins; fall back to the shared LiteLLM proxy config.
+    base_url = getattr(docling_serve_settings, "graph_litellm_base_url", None) or getattr(
+        docling_serve_settings, "litellm_base_url", None
+    )
+    api_key = getattr(docling_serve_settings, "graph_litellm_api_key", None) or getattr(
+        docling_serve_settings, "litellm_api_key", None
+    )
     if not base_url or not api_key:
         return None
     template = (

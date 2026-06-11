@@ -1459,6 +1459,8 @@ def test_graph_enhancer_skips_when_unconfigured(tmp_path, monkeypatch):
 
     monkeypatch.setattr(docling_serve_settings, "graph_litellm_base_url", None)
     monkeypatch.setattr(docling_serve_settings, "graph_litellm_api_key", None)
+    monkeypatch.setattr(docling_serve_settings, "litellm_base_url", None)
+    monkeypatch.setattr(docling_serve_settings, "litellm_api_key", None)
 
     ctx = _ctx(tmp_path, "doc.pdf", enhancements=["knowledge_graph"])
     (ctx.bundle_dir / "document.md").write_text("hi", encoding="utf-8")
@@ -1498,6 +1500,8 @@ def test_graph_payload_from_text_raises_when_unconfigured(monkeypatch):
     monkeypatch.setattr(ge.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(docling_serve_settings, "graph_litellm_base_url", None)
     monkeypatch.setattr(docling_serve_settings, "graph_litellm_api_key", None)
+    monkeypatch.setattr(docling_serve_settings, "litellm_base_url", None)
+    monkeypatch.setattr(docling_serve_settings, "litellm_api_key", None)
 
     with pytest.raises(ge.GraphExtractionUnavailable):
         ge.graph_payload_from_text("some text")

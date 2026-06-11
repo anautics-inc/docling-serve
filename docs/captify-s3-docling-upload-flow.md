@@ -8,10 +8,9 @@
 
 Captify sends uploaded files to docling-serve as multipart form data. Generic
 deep extraction is requested with `extraction=deep` and publishes Docling
-outputs as an expanded S3 object tree. PowerPoint courseware analysis is a
-separate prototype/courseware layer under
-`docling_serve/powerpoint_courseware/`; it is not part of the generic
-PDF/DOCX/XLSX/image extraction path.
+outputs as an expanded S3 object tree. (The former PowerPoint courseware
+prototype layer was removed 2026-06-11; PPTX goes through the generic
+python-pptx deep-extraction path.)
 
 The deep extraction contract uses:
 

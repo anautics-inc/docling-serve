@@ -36,37 +36,6 @@ IMAGE_SUFFIXES = {
     ".svg",
 }
 
-# Extension -> extractor name. The name is what the bundle reports and how the
-# structured pass is chosen. Unknown types fall back to the docling document
-# extractor so nothing is ever dropped.
-EXTRACTOR_BY_SUFFIX: dict[str, str] = {
-    ".ppt": "extract_ppt",
-    ".pptx": "extract_ppt",
-    ".doc": "extract_doc",
-    ".docx": "extract_doc",
-    ".pdf": "extract_pdf",
-    ".xls": "extract_xls",
-    ".xlsx": "extract_xls",
-    ".xlsm": "extract_xls",
-    ".csv": "extract_xls",
-    ".txt": "extract_text",
-    ".md": "extract_text",
-    ".markdown": "extract_text",
-    ".accdb": "extract_access",
-    ".mdb": "extract_access",
-}
-for _suffix in IMAGE_SUFFIXES:
-    EXTRACTOR_BY_SUFFIX.setdefault(_suffix, "extract_image")
-
-def extractor_for(filename: str) -> str:
-    """Name of the typed extractor that will handle ``filename`` by suffix.
-
-    Kept for reporting/back-compat; the real dispatch is
-    :func:`docling_serve.extractors.select_extractor`, which also honours the
-    per-request ``profile``.
-    """
-    return EXTRACTOR_BY_SUFFIX.get(Path(filename).suffix.lower(), "extract_doc")
-
 
 def assemble_document_bundle(
     *,

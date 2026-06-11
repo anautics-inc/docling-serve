@@ -16,9 +16,6 @@ the document pipeline reads ``document.md`` to chunk for OpenSearch / NER / Neo4
 
 from __future__ import annotations
 
-from docling_serve.extraction.service import (
-    assemble_document_bundle,
-    extractor_for,
-)
+from docling_serve.extraction.service import assemble_document_bundle
 
-__all__ = ["assemble_document_bundle", "extractor_for"]
+__all__ = ["assemble_document_bundle"]

@@ -280,7 +280,8 @@ When a user uploads a document via the Spaces or Wiki UI:
       AND docling.convertDocument(buffer, filename, {ocrEngine})        ← endpoint §2.4
       in parallel
    c. Saves converted markdown back to S3 (sidecar)
-   d. Runs AWS Comprehend on chunk texts (entities, key phrases)
+   d. Extracts entities/relations via docling-serve POST /v1/graph/extract
+      (docling-graph + LiteLLM; replaced the old AWS Comprehend step)
    e. Generates embeddings via Bedrock
    f. Indexes chunks to OpenSearch (datasetId as index suffix)
    g. Marks document COMPLETE in DynamoDB

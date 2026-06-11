@@ -26,10 +26,12 @@ inference, pedagogical review) and its prototype harness
 It was a prototype-era instructional-analysis layer that was never wired into
 the service. The generic `extraction=deep` path is structural only: no course
 model or pedagogical fields are emitted. Historical context lives in
-`tests/audit.md` and `.specify/specs/2026-05-20-extend-metadata/`.
+`.specify/specs/2026-05-20-extend-metadata/`.
 
-Remaining `tests/prototype/` files are archived research history; do not build
-against them (same for `tests/trash/experiments/*`).
+The `tests/prototype/` tree and `tests/audit.md` (courseware-era research
+history and audit log) were deleted in the same cleanup. Untracked local
+archives like `tests/trash/` are not part of the repo; do not build against
+them.
 
 ## Required Verification Loop
 

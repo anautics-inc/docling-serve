@@ -29,6 +29,10 @@ def auth_headers():
 
 @pytest_asyncio.fixture(scope="session")
 async def app():
+    # The picture-description options below call an external API, which docling
+    # only permits when remote services are explicitly enabled. Without this the
+    # conversion fails and the endpoint can never return 200.
+    docling_serve_settings.enable_remote_services = True
     app = create_app()
 
     async with LifespanManager(app) as manager:

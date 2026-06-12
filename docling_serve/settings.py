@@ -1,7 +1,6 @@
 import enum
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any, Union
 
@@ -166,6 +165,13 @@ class DoclingServeSettings(BaseSettings):
     # model per document.
     enhancement_max_images: int = 40
 
+    # === Extraction connectors ===
+    # Allow-list of source connectors callers may request via the ``connector``
+    # form field. ``file`` is always available. Empty -> all built-ins allowed.
+    allowed_connectors: list[str] | None = None
+    # Bytes ceiling per Access database / S3 object pulled by a connector.
+    connector_max_object_bytes: int = 512 * 1024 * 1024
+
     # === Knowledge-graph extraction (docling-graph via LiteLLM) ===
     # The opt-in ``knowledge_graph`` enhancer runs docling-graph's template-driven
     # entity+relationship extraction (the AWS Comprehend NER replacement) and routes
@@ -202,8 +208,10 @@ class DoclingServeSettings(BaseSettings):
     api_key: str = ""
 
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
-    max_num_pages: int = sys.maxsize
-    max_file_size: int = sys.maxsize
+    # Finite ceilings (overridable) so a single oversized/zip-bomb document
+    # cannot pin a worker indefinitely. Raise via env if a deployment needs it.
+    max_num_pages: int = 10_000
+    max_file_size: int = 1024 * 1024 * 1024  # 1 GiB
 
     # Threading pipeline
     queue_max_size: int | None = None
@@ -461,6 +469,7 @@ class DoclingServeSettings(BaseSettings):
         "allowed_layout_presets",
         "allowed_ocr_presets",
         "allowed_ocr_kinds",
+        "allowed_connectors",
         mode="before",
     )
     @classmethod

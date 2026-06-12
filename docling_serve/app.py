@@ -10,7 +10,9 @@ import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import psutil
 from fastapi import (
@@ -35,6 +37,7 @@ from fastapi.openapi.docs import (
 )
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from scalar_fastapi import get_scalar_api_reference
 
 from docling.datamodel.base_models import DocumentStream
@@ -89,8 +92,28 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
-from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends
-from docling_serve.identity import RequestIdentity
+from docling_serve.deep_document.options import (
+    deep_extraction_mode,
+    prepare_deep_convert_options,
+)
+from docling_serve.deep_document.s3_publisher import (
+    S3_REQUIRED_MESSAGE,
+    DeepBucketNotAllowed,
+    deep_bucket_available,
+    ensure_bucket_allowed,
+)
+from docling_serve.extraction.legacy_office import (
+    LegacyOfficeConversionError,
+    convert_legacy_office_bytes,
+    is_legacy_office,
+)
+from docling_serve.extractors import NON_DOCLING_SUFFIXES
+from docling_serve.identity import RequestIdentity, bind_identity
+from docling_serve.helper_functions import (
+    DOCLING_VERSIONS,
+    FormDepends,
+    coerce_supported_filename,
+)
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
     get_metrics_endpoint_content,
@@ -196,6 +219,52 @@ async def lifespan(app: FastAPI):
     # Remove scratch directory in case it was a tempfile
     if docling_serve_settings.scratch_path is not None:
         shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+##################################
+# Knowledge-graph extraction API  #
+##################################
+
+
+class GraphExtractRequest(BaseModel):
+    """Request body for ``POST /v1/graph/extract``."""
+
+    text: str = Field(description="Converted document text/markdown to extract a graph from")
+    template: str | None = Field(
+        default=None,
+        description="Dotted import path to a docling-graph Pydantic template; "
+        "empty uses the configured default (generic entity/relation graph).",
+    )
+    profile: str | None = Field(
+        default=None,
+        description="Extraction profile (e.g. schematic, access); selects the matching "
+        "domain template when no explicit template is given.",
+    )
+
+
+class ImageContextResponse(BaseModel):
+    """Vision descriptions for a document's significant images."""
+
+    images: list[dict] = Field(default_factory=list)
+    count: int = 0
+    #: Populated when description was skipped (e.g. Bedrock unconfigured).
+    note: str | None = None
+
+
+class GraphExtractResponse(BaseModel):
+    """Typed entity + relationship graph extracted from text."""
+
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)
+    labels: dict[str, int] = Field(default_factory=dict)
+    edgeLabels: dict[str, int] = Field(default_factory=dict)
+    nodeCount: int = 0
+    edgeCount: int = 0
+    template: str | None = None
+    model: dict | None = None
+    extractedModels: int | None = None
+    #: Populated when extraction was skipped (e.g. unconfigured); empty graph returned.
+    note: str | None = None
 
 
 ##################################
@@ -451,19 +520,69 @@ def create_app():  # noqa: C901
         callbacks: list[CallbackSpec] | None = None,
         tenant_id: str | None = None,
         identity: RequestIdentity | None = None,
+        extraction: str = "default",
+        deep_s3_bucket: str = "",
+        deep_s3_prefix: str = "",
+        profile: str = "default",
+        enhancements: str = "",
     ) -> Task:
         _log.info(
             f"[TENANT_ID] _enque_file called with tenant_id='{tenant_id}', "
             f"processing {len(files)} files"
         )
 
+        # Deep extraction reconstructs the original file with native parsers
+        # (e.g. python-pptx needs real geometry) but Docling only sees an
+        # in-memory stream. Persist the raw uploads to a scratch dir so the deep
+        # worker can re-open the true bytes by filename at assemble time. The
+        # same applies to chunk uploads owned by a non-docling extractor (e.g.
+        # an Access DB read natively via mdbtools): the worker needs the real
+        # bytes because docling can never convert them.
+        deep_source_dir: Path | None = None
+        needs_source_bytes = any(
+            Path(file.filename or "").suffix.lower() in NON_DOCLING_SUFFIXES
+            for file in files
+        )
+        if deep_extraction_mode(extraction) or needs_source_bytes:
+            deep_source_dir = get_scratch() / "deep-sources" / uuid4().hex
+            deep_source_dir.mkdir(parents=True, exist_ok=True)
+
         # Load the uploaded files to Docling DocumentStream
         file_sources: list[TaskSource] = []
+        legacy_sources: dict[str, str] = {}
         for i, file in enumerate(files):
             file_bytes = file.file.read()
-            buf = BytesIO(file_bytes)
             suffix = "" if len(file_sources) == 1 else f"_{i}"
             name = file.filename if file.filename else f"file{suffix}.pdf"
+            # Let plain-text uploads (.txt, .log, …) ride Docling's Markdown backend instead of being
+            # rejected for having no dedicated parser — so every text document type ingests.
+            name = coerce_supported_filename(name)
+
+            # Legacy binary Office uploads (.doc/.xls/.ppt) have no docling
+            # backend: pre-convert to the modern equivalent with headless
+            # LibreOffice so the normal extractor chain runs unchanged. The
+            # original filename is preserved in task metadata; a conversion
+            # failure is a typed, user-readable error — not a docling failure.
+            if is_legacy_office(name):
+                original_name = name
+                try:
+                    name, file_bytes = await asyncio.to_thread(
+                        convert_legacy_office_bytes, name, file_bytes
+                    )
+                except LegacyOfficeConversionError as err:
+                    if deep_source_dir is not None:
+                        shutil.rmtree(deep_source_dir, ignore_errors=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=str(err),
+                    ) from err
+                legacy_sources[name] = original_name
+                _log.info(
+                    f"Pre-converted legacy Office upload '{original_name}' "
+                    f"to '{name}' via LibreOffice."
+                )
+
+            buf = BytesIO(file_bytes)
 
             # Log file details for debugging transmission issues
             file_hash = hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()[:12]
@@ -471,6 +590,9 @@ def create_app():  # noqa: C901
                 f"File {i}: name={name}, size={len(file_bytes)} bytes, "
                 f"md5={file_hash}, content_type={file.content_type}"
             )
+
+            if deep_source_dir is not None:
+                (deep_source_dir / Path(name).name).write_bytes(file_bytes)
 
             file_sources.append(DocumentStream(name=name, stream=buf))
 
@@ -484,6 +606,26 @@ def create_app():  # noqa: C901
                 metadata["actor_id"] = identity.actor_id
             if identity.request_id:
                 metadata["request_id"] = identity.request_id
+        # Per-request extraction mode: "default" (legacy response) or "deep"
+        # (full structural extraction + S3 expanded object tree). For "deep",
+        # the caller may supply the S3 destination directly.
+        metadata["extraction"] = extraction
+        # Per-request extraction profile (selects the domain extractor, e.g.
+        # schematic/access/auto) and opt-in enhancers (e.g. image_context).
+        if profile and profile != "default":
+            metadata["profile"] = profile
+        if enhancements:
+            metadata["enhancements"] = enhancements
+        if deep_s3_bucket:
+            metadata["deep_s3_bucket"] = deep_s3_bucket
+        if deep_s3_prefix:
+            metadata["deep_s3_prefix"] = deep_s3_prefix
+        if deep_source_dir is not None:
+            metadata["deep_source_dir"] = str(deep_source_dir)
+        # Converted name -> original upload name for LibreOffice-pre-converted
+        # legacy Office files, so results can report the user's filename.
+        if legacy_sources:
+            metadata["legacy_office_sources"] = legacy_sources
 
         task = await orchestrator.enqueue(
             task_type=task_type,
@@ -495,6 +637,12 @@ def create_app():  # noqa: C901
             callbacks=callbacks or [],
             metadata=metadata,
         )
+
+        # The local orchestrator drops the enqueue() metadata argument, so the
+        # worker would never see the extraction mode. Assign it onto the
+        # returned task directly (the local orchestrator hands the worker this
+        # same object; the RQ orchestrator already serialized metadata above).
+        task.metadata = {**(task.metadata or {}), **metadata}
 
         _log.info(
             f"[TENANT_ID] File task {task.task_id} created with tenant_id='{tenant_id or 'default'}'"
@@ -707,6 +855,79 @@ def create_app():  # noqa: C901
             media_type="text/plain; version=0.0.4",
         )
 
+    # Describe a document's images with the vision model. Synchronous, stateless:
+    # callers upload the original file; significant raster images (PPTX picture
+    # shapes, PDF embedded images) are extracted, de-duplicated, and described so
+    # the ingest path can index/graph image-borne content (charts, diagrams,
+    # screenshots) that text conversion renders as placeholders. Returns an empty
+    # list (not an error) when Bedrock is unconfigured.
+    @app.post("/v1/images/context", tags=["images"])
+    def images_context(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        files: list[UploadFile],
+        max_images: Annotated[int, Form()] = 0,
+    ) -> ImageContextResponse:
+        import tempfile
+
+        from docling_serve.extractors.enhancers import (
+            ImageContextUnavailable,
+            describe_file_images,
+        )
+
+        upload = files[0]
+        suffix = Path(upload.filename or "upload.bin").suffix
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            shutil.copyfileobj(upload.file, handle)
+            tmp_path = Path(handle.name)
+        try:
+            images = describe_file_images(
+                tmp_path, max_images=max_images or None
+            )
+        except ImageContextUnavailable as err:
+            _log.info("Image context unavailable: %s", err)
+            return ImageContextResponse(images=[], note=str(err))
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        return ImageContextResponse(images=images, count=len(images))
+
+    # Extract a knowledge graph (typed entities + relationships) from text.
+    # Synchronous, stateless: callers pass already-converted markdown/text and
+    # get back a node/edge payload. This is the entity-extraction service that
+    # replaces generic NER — the LLM call runs through the configured LiteLLM
+    # proxy via docling-graph. Returns an empty graph (not an error) when the
+    # feature is unconfigured or docling-graph is not installed, so a caller can
+    # treat "no graph" uniformly.
+    @app.post("/v1/graph/extract", tags=["graph"])
+    def extract_graph(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: GraphExtractRequest,
+        identity: Annotated[
+            RequestIdentity | None, Depends(_caller_identity)
+        ] = None,
+    ) -> GraphExtractResponse:
+        from docling_serve.extractors.enhancers import (
+            GraphExtractionUnavailable,
+            graph_payload_from_text,
+            resolve_profile_template,
+        )
+
+        template = body.template or resolve_profile_template(body.profile)
+        try:
+            with bind_identity(identity):
+                payload = graph_payload_from_text(body.text, template=template)
+        except GraphExtractionUnavailable as err:
+            _log.info("Graph extraction unavailable: %s", err)
+            return GraphExtractResponse(
+                nodes=[],
+                edges=[],
+                labels={},
+                edgeLabels={},
+                nodeCount=0,
+                edgeCount=0,
+                note=str(err),
+            )
+        return GraphExtractResponse(**payload)
+
     # Convert a document from URL(s)
     @app.post(
         "/v1/convert/source",
@@ -785,6 +1006,11 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        extraction: Annotated[str, Form()] = "default",
+        deep_s3_bucket: Annotated[str, Form()] = "",
+        deep_s3_prefix: Annotated[str, Form()] = "",
+        profile: Annotated[str, Form()] = "default",
+        enhancements: Annotated[str, Form()] = "",
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
@@ -795,7 +1021,19 @@ def create_app():  # noqa: C901
         options = _prepare_convert_options(options)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
-        target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
+        # "deep" extraction publishes an S3 expanded object tree. The bucket
+        # comes from the request (deep_s3_bucket) or the server default; fail
+        # explicitly only when neither is available.
+        deep = deep_extraction_mode(extraction)
+        if deep and not deep_bucket_available(deep_s3_bucket):
+            raise HTTPException(status_code=503, detail=S3_REQUIRED_MESSAGE)
+        if deep:
+            try:
+                ensure_bucket_allowed(deep_s3_bucket)
+            except DeepBucketNotAllowed as err:
+                raise HTTPException(status_code=400, detail=str(err)) from err
+            options = prepare_deep_convert_options(options)
+        target = ZipTarget() if target_type != TargetName.INBODY else InBodyTarget()
         task = await _enque_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
@@ -807,6 +1045,11 @@ def create_app():  # noqa: C901
             callbacks=[],
             tenant_id=tenant_id,
             identity=identity,
+            extraction=extraction,
+            deep_s3_bucket=deep_s3_bucket,
+            deep_s3_prefix=deep_s3_prefix,
+            profile=profile,
+            enhancements=enhancements,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -888,6 +1131,11 @@ def create_app():  # noqa: C901
             ConvertDocumentsRequestOptions, FormDepends(ConvertDocumentsRequestOptions)
         ],
         target_type: Annotated[TargetName, Form()] = TargetName.INBODY,
+        extraction: Annotated[str, Form()] = "default",
+        deep_s3_bucket: Annotated[str, Form()] = "",
+        deep_s3_prefix: Annotated[str, Form()] = "",
+        profile: Annotated[str, Form()] = "default",
+        enhancements: Annotated[str, Form()] = "",
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
@@ -900,7 +1148,19 @@ def create_app():  # noqa: C901
         _log.info(
             f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
         )
-        target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
+        # "deep" extraction publishes an S3 expanded object tree. The bucket
+        # comes from the request (deep_s3_bucket) or the server default; fail
+        # explicitly only when neither is available.
+        deep = deep_extraction_mode(extraction)
+        if deep and not deep_bucket_available(deep_s3_bucket):
+            raise HTTPException(status_code=503, detail=S3_REQUIRED_MESSAGE)
+        if deep:
+            try:
+                ensure_bucket_allowed(deep_s3_bucket)
+            except DeepBucketNotAllowed as err:
+                raise HTTPException(status_code=400, detail=str(err)) from err
+            options = prepare_deep_convert_options(options)
+        target = ZipTarget() if target_type != TargetName.INBODY else InBodyTarget()
         task = await _enque_file(
             task_type=TaskType.CONVERT,
             orchestrator=orchestrator,
@@ -912,6 +1172,11 @@ def create_app():  # noqa: C901
             callbacks=[],
             tenant_id=tenant_id,
             identity=identity,
+            extraction=extraction,
+            deep_s3_bucket=deep_s3_bucket,
+            deep_s3_prefix=deep_s3_prefix,
+            profile=profile,
+            enhancements=enhancements,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id

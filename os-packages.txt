@@ -9,3 +9,10 @@ openssl-fips-provider
 # mdbtools provides mdb-export/mdb-schema/mdb-tables, used by the Access (.mdb/
 # .accdb) extractor. Requires EPEL (enabled in the Containerfile).
 mdbtools
+# LibreOffice headless provides soffice, used to pre-convert legacy binary
+# Office uploads (.doc/.xls/.ppt) to their modern OOXML equivalents before the
+# normal docling extractor chain runs (see extraction/legacy_office.py).
+libreoffice-headless
+libreoffice-writer
+libreoffice-calc
+libreoffice-impress

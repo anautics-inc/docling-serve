@@ -8,6 +8,76 @@
 
 Running [Docling](https://github.com/docling-project/docling) as an API service.
 
+> [!IMPORTANT]
+> **This is the Captify fork** (`anautics-inc/docling-serve`). It extends
+> upstream docling-serve with the Captify extraction subsystem and a
+> hardened security/attribution model. See
+> [Captify additions](#captify-additions) below before working in this repo.
+
+## Captify additions
+
+This fork is deployed as a private internal service behind the
+Cognito-gated captify gateway (captify-pytology). On top of upstream
+docling-serve it adds:
+
+### Extraction subsystem
+
+- **Typed extractors** (`docling_serve/extractors/`): a registry-dispatched
+  extractor chain per document family — PPTX (native geometry via
+  python-pptx), Access databases (mdbtools), XFA forms, schematics
+  (vector + raster KiCad reconstruction, net tracing, DC simulation), and a
+  generic Docling-backed extractor. Selected per request via the `profile`
+  form field (`auto` / `schematic` / `document` / …).
+- **Enhancers** (`docling_serve/extractors/enhancers/`): opt-in enrichment
+  passes — `image_context` (vision descriptions of embedded images) and
+  `knowledge_graph` (entity/relation extraction via
+  [docling-graph](https://github.com/docling-project/docling-graph)).
+- **Deep extraction bundles** (`docling_serve/deep_document/`,
+  `docling_serve/extraction/`): `extraction=deep` uploads publish one
+  standard S3 bundle per document (`document.json` / `document.md` /
+  `document.html` / `media/` / `extraction.json`) plus a live
+  `progress.json`, so notebooks can render an editable digital document
+  while the pipeline chunks the markdown for OpenSearch / Neo4j.
+- **Graph endpoint** (`POST /v1/graph/extract`): stateless knowledge-graph
+  extraction from converted text. The ontology layer downstream owns
+  persistence (Neo4j/OpenSearch) — docling-serve never writes to a graph
+  store directly.
+- **Legacy Office pre-conversion**: `.doc`/`.xls`/`.ppt` uploads are
+  converted with headless LibreOffice before the normal chain runs.
+
+See [docs/extraction-connectors-extractors-enhancers.md](./docs/extraction-connectors-extractors-enhancers.md)
+and [docs/deep-document-object-contract.md](./docs/deep-document-object-contract.md).
+
+### Security & model-call routing
+
+- **All model calls route through the LiteLLM proxy** — vision passes and
+  knowledge-graph extraction authenticate with a service-scoped LiteLLM
+  virtual key. The service holds **no** Bedrock/IAM model credentials, and
+  its AWS access is S3-only with an explicit destination-bucket allow-list.
+- **Service auth is enforced**: callers must present the shared
+  `X-Api-Key` (`DOCLING_SERVE_API_KEY`). Unset = unauthenticated; never run
+  that way.
+- **Per-user spend attribution**: the gateway forwards
+  `x-captify-tenant-id` / `x-captify-actor-id` / `x-request-id`; the
+  service binds them to the extraction task and forwards them on every
+  model call, so LiteLLM spend logs attribute usage to the originating
+  user and tenant even though the proxy key is service-scoped.
+
+Full contract: [docs/captify-security-and-attribution.md](./docs/captify-security-and-attribution.md).
+
+### Working in this repo
+
+- `AGENTS.md` is the agent/developer briefing (verification loop, removed
+  prototypes, restart procedure).
+- Configuration lives in `.env` (documented inline) with the annotated
+  template in `.env.example`.
+- Run the service via pm2: `pm2 restart docling-serve` — single worker on
+  purpose (in-memory task store).
+- Verification loop for extraction changes:
+  `uv run pytest tests/test_extraction_pipeline.py tests/test_identity_attribution.py tests/test_deep_document_export.py tests/test_env_parsing.py tests/test_config_file_loading.py tests/test_deep_document_options.py tests/test_deep_document_docling_adapter.py`
+
+---
+
 📚 [Docling Serve documentation](./docs/README.md)
 
 - Learning how to [configure the webserver](./docs/configuration.md)

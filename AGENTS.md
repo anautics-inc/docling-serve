@@ -18,6 +18,19 @@ All model calls (vision passes, knowledge-graph extraction) route through the
 LiteLLM proxy — see `providers/bedrock.py` and the LiteLLM section of `.env`.
 Do not add direct Bedrock/boto3 model calls.
 
+## Security & per-user attribution (2026-06-11)
+
+The service enforces `X-Api-Key` auth (`DOCLING_SERVE_API_KEY`) and threads
+the gateway-forwarded caller identity (`x-captify-tenant-id`,
+`x-captify-actor-id`, `x-request-id`) through task metadata into every model
+call via `docling_serve/identity.py` (a `ContextVar`; see `bind_identity`).
+When adding a new code path that calls a model, do NOT thread identity
+arguments through signatures — read `current_identity()` in the transport, and
+make sure the path runs inside a `bind_identity(...)` scope (the deep-export
+worker and the sync graph endpoint already do this). Full contract:
+`docs/captify-security-and-attribution.md`. Regression tests:
+`tests/test_identity_attribution.py`.
+
 ## Removed: PowerPoint courseware prototype (2026-06-11)
 
 `docling_serve/powerpoint_courseware/` (course model, Bloom taxonomy, module

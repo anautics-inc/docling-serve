@@ -31,6 +31,7 @@ from docling_serve.deep_document.s3_publisher import (
 )
 from docling_serve.extraction.service import assemble_document_bundle
 from docling_serve.extractors import ExtractionContext, select_registry_extractor
+from docling_serve.identity import bind_identity, identity_from_task_metadata
 
 if TYPE_CHECKING:
     from docling_jobkit.orchestrators.callback_invoker import CallbackInvoker
@@ -189,17 +190,22 @@ def process_export_results_with_deep_document(
 
     if progress:
         progress("extracting")
-    manifests = assemble_bundles(
-        conv_results=conv_results_list,
-        raw_dir=raw_dir,
-        output_dir=output_dir,
-        task_id=task.task_id,
-        source_dir=task_source_dir(task),
-        profile=task_profile(task),
-        enhancements=task_enhancements(task),
-        progress=progress,
-        original_names=task_legacy_sources(task),
-    )
+    # Re-bind the caller identity captured at the HTTP layer so every model
+    # call made by extractors/enhancers below is attributed to the
+    # originating user/tenant in LiteLLM spend logs.
+    identity = identity_from_task_metadata(getattr(task, "metadata", None))
+    with bind_identity(identity):
+        manifests = assemble_bundles(
+            conv_results=conv_results_list,
+            raw_dir=raw_dir,
+            output_dir=output_dir,
+            task_id=task.task_id,
+            source_dir=task_source_dir(task),
+            profile=task_profile(task),
+            enhancements=task_enhancements(task),
+            progress=progress,
+            original_names=task_legacy_sources(task),
+        )
 
     # Documents docling could not convert but a registry extractor bundled
     # natively (e.g. an Access DB via mdbtools) count as succeeded.

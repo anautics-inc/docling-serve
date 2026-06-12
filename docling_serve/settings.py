@@ -341,8 +341,14 @@ class DoclingServeSettings(BaseSettings):
     # Logging
     eng_ray_log_level: str = "INFO"
 
-    # Tenant ID Header
-    eng_ray_tenant_id_header: str = "X-Tenant-Id"
+    # Caller identity headers. The captify gateway (pytology) forwards the
+    # authenticated user on every request; these names must match what
+    # serve_client.py sends. The legacy "X-Tenant-Id" name was never sent by
+    # any caller, so tenant always fell back to "default" — keep these aligned
+    # with the gateway.
+    eng_ray_tenant_id_header: str = "x-captify-tenant-id"
+    actor_id_header: str = "x-captify-actor-id"
+    request_id_header: str = "x-request-id"
 
     # OpenTelemetry settings
     otel_enable_metrics: bool = True

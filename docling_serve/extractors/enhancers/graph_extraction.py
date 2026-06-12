@@ -34,6 +34,7 @@ from typing import Any
 from docling_serve.deep_document.artifact_writer import write_json
 from docling_serve.extractors.base import ExtractionContext, ExtractorResult
 from docling_serve.extractors.enhancers.base import EnhancementResult, Enhancer
+from docling_serve.identity import current_identity
 from docling_serve.settings import docling_serve_settings
 
 _log = logging.getLogger(__name__)
@@ -124,6 +125,15 @@ def run_graph_extraction(source_path: Path, cfg: _GraphConfig) -> tuple[Any, int
 
     template_cls = _import_template(cfg.template)
 
+    # Spend attribution: the proxy key is service-scoped, so the caller's
+    # identity headers (recorded as spend-log tags by the proxy via
+    # extra_spend_tag_headers) are how graph-extraction usage is isolated per
+    # user/tenant in spend logs and dashboards.
+    request_headers = {"x-litellm-tags": "docling-graph"}
+    identity = current_identity()
+    if identity is not None:
+        request_headers.update(identity.headers())
+
     pipeline_config = dg.PipelineConfig(
         source=str(source_path),
         template=template_cls,
@@ -141,10 +151,7 @@ def run_graph_extraction(source_path: Path, cfg: _GraphConfig) -> tuple[Any, int
             connection=dg_cfg.ConnectionOverrides(
                 base_url=cfg.base_url,
                 api_key=SecretStr(cfg.api_key),
-                # Tag for LiteLLM spend attribution: the proxy key is shared
-                # platform-wide, so tags are the only way to isolate graph-extraction
-                # token usage/cost in spend logs and dashboards.
-                headers={"x-litellm-tags": "docling-graph"},
+                headers=request_headers,
             ),
             # docling-graph cannot resolve token limits through a proxy alias and
             # falls back to 4092 output tokens, which truncates document-scale

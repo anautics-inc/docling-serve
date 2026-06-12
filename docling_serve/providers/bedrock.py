@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from docling_serve.identity import current_identity
 from docling_serve.settings import docling_serve_settings
 
 _log = logging.getLogger(__name__)
@@ -187,10 +188,22 @@ class BedrockProvider:
                 temperature if temperature is not None else self._temperature
             ),
         }
+        # Attribute the spend to the originating user/tenant when a request
+        # identity is bound (deep-extraction tasks bind it from task metadata).
+        # The call still authenticates with the docling-serve service key.
+        identity = current_identity()
+        tags = ["docling-vision"]
+        request_headers = {}
+        if identity is not None:
+            if identity.end_user:
+                payload["user"] = identity.end_user
+            tags.extend(identity.tags())
+            request_headers.update(identity.headers())
+        request_headers["x-litellm-tags"] = ",".join(tags)
 
         parts: list[str] = []
         for _ in range(_MAX_CONTINUATION_ROUNDS + 1):
-            data = self._post_chat_completion(client, payload)
+            data = self._post_chat_completion(client, payload, headers=request_headers)
             text, finish_reason = _extract_text(data)
             parts.append(text)
             if finish_reason != "length":
@@ -219,7 +232,10 @@ class BedrockProvider:
         return "".join(parts)
 
     def _post_chat_completion(
-        self, client: Any, payload: dict[str, Any]
+        self,
+        client: Any,
+        payload: dict[str, Any],
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         import httpx
 
@@ -228,7 +244,7 @@ class BedrockProvider:
             if attempt:
                 time.sleep(min(2.0 ** attempt, 10.0))
             try:
-                response = client.post("/chat/completions", json=payload)
+                response = client.post("/chat/completions", json=payload, headers=headers)
             except httpx.HTTPError as err:
                 last_error = err
                 _log.warning(

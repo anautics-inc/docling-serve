@@ -1,0 +1,159 @@
+{
+  "documentNumber": "34Y3-30-1",
+  "documentTitle": "DEGREASER, PORTABLE, LIQUID TYPE",
+  "triage": {
+    "extractionClass": "born-digital",
+    "formatFamily": "mpl-modern",
+    "documentKind": "basic",
+    "documentType": "TO-IPB",
+    "pageCount": 10,
+    "producer": "Acrobat Distiller 9.5.5 (Windows)",
+    "creator": "XPP 8.4C.1 SP#2",
+    "medianCharsPerPage": 3519,
+    "signals": [
+      "producer=Acrobat Distiller 9.5.5 (Windows)"
+    ]
+  },
+  "figure": {
+    "figureNumber": "2",
+    "figureTitle": "Portable Degreaser, Exploded View",
+    "sheetNumber": "",
+    "sheetTotal": null,
+    "pageNumber": 7,
+    "mediaKey": ""
+  },
+  "entries": [
+    {
+      "sequence": 1,
+      "pageNumber": 7,
+      "figureIndexRaw": "",
+      "partNumberRaw": "51079",
+      "cageRaw": "00ET4",
+      "descriptionRaw": "DEGREASER, Portable . . . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 0,
+      "parentSequence": null,
+      "rowType": "end-item"
+    },
+    {
+      "sequence": 2,
+      "pageNumber": 7,
+      "figureIndexRaw": "1",
+      "partNumberRaw": "51079-1",
+      "cageRaw": "00ET4",
+      "descriptionRaw": ". BASKET, Dipping-draining . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 3,
+      "pageNumber": 7,
+      "figureIndexRaw": "2",
+      "partNumberRaw": "51079-2",
+      "cageRaw": "00ET4",
+      "descriptionRaw": ". SHELF, Drying . . . . . . . . . . . . . . . . . . . . . . ",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 4,
+      "pageNumber": 7,
+      "figureIndexRaw": "3",
+      "partNumberRaw": "51079-3",
+      "cageRaw": "00ET4",
+      "descriptionRaw": ". SHELF, Tank . . . . . . . . . . . . . . . . . . . . . . . ",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 5,
+      "pageNumber": 7,
+      "figureIndexRaw": "4",
+      "partNumberRaw": "51079-4",
+      "cageRaw": "00ET4",
+      "descriptionRaw": ". FASTENER AND CHAIN ASSEMBLY . . . . . . . . .",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 6,
+      "pageNumber": 7,
+      "figureIndexRaw": "5",
+      "partNumberRaw": "MS35206-267",
+      "cageRaw": "80208",
+      "descriptionRaw": ". . SCREW, Machine . . . . . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 2,
+      "parentSequence": 5,
+      "rowType": "part"
+    },
+    {
+      "sequence": 7,
+      "pageNumber": 8,
+      "figureIndexRaw": "6",
+      "partNumberRaw": "MS35649-202",
+      "cageRaw": "80205",
+      "descriptionRaw": ". . NUT, Plain, hexagon . . . . . . . . . . . . . . . . . . ",
+      "indentureLevel": 2,
+      "parentSequence": 5,
+      "rowType": "part"
+    },
+    {
+      "sequence": 8,
+      "pageNumber": 8,
+      "figureIndexRaw": "7",
+      "partNumberRaw": "MS35338-43",
+      "cageRaw": "80205",
+      "descriptionRaw": ". . WASHER, Lock . . . . . . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 2,
+      "parentSequence": 5,
+      "rowType": "part"
+    },
+    {
+      "sequence": 9,
+      "pageNumber": 8,
+      "figureIndexRaw": "8",
+      "partNumberRaw": "51079-5",
+      "cageRaw": "00ET4",
+      "descriptionRaw": ". BRACKET, Cover . . . . . . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 10,
+      "pageNumber": 8,
+      "figureIndexRaw": "9",
+      "partNumberRaw": "482J2",
+      "cageRaw": "57068",
+      "descriptionRaw": ". HANDLE, Bow . . . . . . . . . . . . . . . . . . . . . . . ",
+      "indentureLevel": 1,
+      "parentSequence": 1,
+      "rowType": "part"
+    },
+    {
+      "sequence": 11,
+      "pageNumber": 8,
+      "figureIndexRaw": "10",
+      "partNumberRaw": "AN515-10-6",
+      "cageRaw": "88044",
+      "descriptionRaw": ". . SCREW, Machine . . . . . . . . . . . . . . . . . . . . .",
+      "indentureLevel": 2,
+      "parentSequence": 10,
+      "rowType": "part"
+    },
+    {
+      "sequence": 12,
+      "pageNumber": 8,
+      "figureIndexRaw": "11",
+      "partNumberRaw": "MS35649-202",
+      "cageRaw": "80205",
+      "descriptionRaw": ". . NUT, Plain, hexagon . . . . . . . . . . . . . . . . . . ",
+      "indentureLevel": 2,
+      "parentSequence": 10,
+      "rowType": "part"
+    }
+  ]
+}

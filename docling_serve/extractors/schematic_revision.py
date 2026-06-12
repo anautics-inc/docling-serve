@@ -409,7 +409,13 @@ def _upload_schematic_dir(bucket: str, prefix: str, source: Path) -> int:
     return uploaded
 
 
-def _update_manifest_counts(bucket: str, prefix: str, graph: dict[str, Any]) -> None:
+def _update_manifest_counts(
+    bucket: str,
+    prefix: str,
+    graph: dict[str, Any],
+    kbl_check: CheckResult | None = None,
+    source_stem: str | None = None,
+) -> None:
     client = _s3_client()
     key = f"{prefix}/extraction.json"
     manifest = json.loads(client.get_object(Bucket=bucket, Key=key)["Body"].read())
@@ -418,6 +424,16 @@ def _update_manifest_counts(bucket: str, prefix: str, graph: dict[str, Any]) -> 
         schematic["componentCount"] = len(graph.get("components") or [])
         schematic["netCount"] = len(graph.get("nets") or [])
         schematic["revision"] = graph.get("revision")
+        if source_stem and not schematic.get("eevisionCsv"):
+            # Bundles extracted before the EEvision table existed gain the
+            # manifest pointer when the revise regenerates artifacts.
+            schematic["eevisionCsv"] = f"schematic/{source_stem}.eevision.csv"
+        if kbl_check is not None:
+            # Formal standard targeting + validation evidence, recorded ON the
+            # bundle (audit finding: "no schema authority binding at export").
+            schematic["kblStandard"] = "VDA KBL 2.4 SR-1"
+            schematic["kblSchemaValid"] = kbl_check.status == "pass"
+            schematic["kblValidationDetail"] = kbl_check.detail
     client.put_object(
         Bucket=bucket,
         Key=key,
@@ -471,6 +487,30 @@ def revise_schematic_bundle(
         _, graph = _download_schematic_dir(bucket, prefix, target)
 
         outcome.applied = apply_graph_edits(graph, edits)
+        # Bundles extracted before connectivity-id assignment existed gain
+        # wire ids + 2-terminal pins on their next save (idempotent).
+        from docling_serve.extractors.connectivity_ids import (
+            assign_two_terminal_pins,
+            assign_wire_ids,
+        )
+
+        wire_ids = assign_wire_ids(graph)
+        pins = assign_two_terminal_pins(graph)
+        if wire_ids or pins:
+            outcome.notes.append(
+                f"connectivity_ids: {wire_ids} wire id(s), {pins} pin(s) assigned"
+            )
+        # Refresh the QA block: engineer edits (pin fills, deletions) move
+        # memberships off the worklist on every save.
+        from docling_serve.extractors.connectivity_ids import (
+            record_connectivity_quality,
+        )
+
+        quality = record_connectivity_quality(graph)
+        outcome.notes.append(
+            f"connectivity_quality: {quality['pinnedCount']}/"
+            f"{quality['membershipCount']} pinned"
+        )
         source = graph.get("source") or {}
         # Older bundles predate the tenant stamp; the prefix is authoritative
         # (tenants/<t>/…). Tenant scoping drives model-library resolution.
@@ -491,6 +531,11 @@ def revise_schematic_bundle(
             graph_to_kicad_netlist(graph, source_name=source_name)
         )
         (target / f"{stem}.edml").write_text(graph_to_edml(graph, source_name=source_name))
+        from docling_serve.extractors.eevision import graph_to_eevision_csv
+
+        (target / f"{stem}.eevision.csv").write_text(
+            graph_to_eevision_csv(graph, source_name=source_name)
+        )
         (target / f"{stem}.xml").write_text(graph_to_xml(graph, source_name=source_name))
         (target / f"{stem}.kbl").write_text(graph_to_kbl(graph, source_name=source_name))
         (target / f"{stem}.cir").write_text(graph_to_spice(graph, source_name=source_name))
@@ -526,9 +571,12 @@ def revise_schematic_bundle(
 
         uploaded = _upload_schematic_dir(bucket, prefix, target)
         outcome.notes.append(f"republished {uploaded} artifact(s)")
-        _update_manifest_counts(bucket, prefix, graph)
 
         outcome.checks = run_delivery_checks(graph, target)
+        kbl_check = next((c for c in outcome.checks if c.id == "kbl"), None)
+        _update_manifest_counts(
+            bucket, prefix, graph, kbl_check=kbl_check, source_stem=stem
+        )
     return outcome
 
 

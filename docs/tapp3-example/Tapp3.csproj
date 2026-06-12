@@ -1,0 +1,68 @@
+<!-- The project SDK is a set of MSBuild targets and associated tasks that 
+     are responsible for compiling, packing, and publishing code. -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Set platform target and output type -->
+  <PropertyGroup>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <!-- Set supported target frameworks -->
+  <PropertyGroup Condition="$(DOTNET_VERSION) == 21">
+    <TargetFrameworks>netcoreapp2.1</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(DOTNET_VERSION) == 31">
+    <TargetFrameworks>netcoreapp2.1;netcoreapp3.1</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(DOTNET_VERSION) == 50">
+    <TargetFrameworks>netcoreapp2.1;netcoreapp3.1;net5.0</TargetFrameworks>
+  </PropertyGroup>
+
+  <!-- Set some file properties for the resulting DLL -->
+  <PropertyGroup>
+    <Company>Altair Engineering Inc.</Company>
+    <Copyright>$(YEAR) by $(Company)</Copyright>
+    <Product>.NET C# Tapp3 for EDB creator API</Product>
+  </PropertyGroup>
+
+  <!-- Overwrite default output paths -->
+  <!-- Note: The BaseIntermediateOutputPath must be already overwritten 
+       via command line switch to avoid warning MSB3539 -->
+  <PropertyGroup>
+    <MyOutDir>$(BaseIntermediateOutputPath)</MyOutDir>
+    <IntermediateOutputPath>$(MyOutDir)</IntermediateOutputPath>
+    <BaseOutputPath>$(MyOutDir)</BaseOutputPath>
+    <OutputPath>$(MyOutDir)</OutputPath>
+    <OutDir>$(MyOutDir)</OutDir>
+  </PropertyGroup>
+  
+  <!-- Settings for Debug and Release build -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <!-- Note: DEBUG is defined internally for Debug builds -->
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>false</Optimize>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Note: RELEASE is defined internally for Release builds -->
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <!-- Avoid compiling all *.cs files in directory -->
+  <PropertyGroup>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <!-- Files to compile -->
+  <ItemGroup>
+    <Compile Include="Tapp3.cs" />
+  </ItemGroup>
+
+  <!-- Add reference to NedbCreator.dll -->
+  <ItemGroup>
+    <Reference Include="NedbCreator">
+      <HintPath>$(MyOutDir)..\NedbCreator\NedbCreator.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

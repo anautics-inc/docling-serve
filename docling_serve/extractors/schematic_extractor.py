@@ -365,6 +365,15 @@ class SchematicExtractor(Extractor):
             text_labels_by_page=page_text_labels,
             tenant_id=_tenant_from_manifest_key(ctx.source_manifest_key),
         )
+        _stamp_page_sizes(graph, _collect_page_sizes_pt(svg_paths, page_results))
+        _enrich_connectivity(
+            graph,
+            page_text_labels=page_text_labels,
+            page_images=page_images,
+            provider=provider,
+            ctx=ctx,
+            notes=notes,
+        )
         validate_artifact(graph, "schematic-graph.schema.json")
 
         graph_path = schematic_dir / "schematic-graph.json"
@@ -383,6 +392,15 @@ class SchematicExtractor(Extractor):
         edml_path.write_text(edml_text)
         artifacts.append(edml_path.relative_to(ctx.bundle_dir).as_posix())
 
+        # EEvision excel2edb table (the vendor-documented simple delivery
+        # format): one row per wire with A/B extremities.
+        from docling_serve.extractors.eevision import graph_to_eevision_csv
+
+        eevision_text = graph_to_eevision_csv(graph, source_name=ctx.source_path.name)
+        eevision_path = schematic_dir / f"{ctx.source_path.stem}.eevision.csv"
+        eevision_path.write_text(eevision_text)
+        artifacts.append(eevision_path.relative_to(ctx.bundle_dir).as_posix())
+
         xml_text = graph_to_xml(graph, source_name=ctx.source_path.name)
         xml_path = schematic_dir / f"{ctx.source_path.stem}.xml"
         xml_path.write_text(xml_text)
@@ -392,6 +410,18 @@ class SchematicExtractor(Extractor):
         kbl_path = schematic_dir / f"{ctx.source_path.stem}.kbl"
         kbl_path.write_text(kbl_text)
         artifacts.append(kbl_path.relative_to(ctx.bundle_dir).as_posix())
+        # Validate against the official VDA KBL 2.4 SR-1 XSD at export time and
+        # record the verdict on the bundle — formal standard targeting.
+        kbl_schema_valid: bool | None = None
+        try:
+            from docling_serve.extractors.schematic_revision import check_kbl
+
+            kbl_verdict = check_kbl(kbl_path)
+            if kbl_verdict.status in ("pass", "fail"):
+                kbl_schema_valid = kbl_verdict.status == "pass"
+            notes.append(f"kbl_validation: {kbl_verdict.status} ({kbl_verdict.detail})")
+        except Exception as error:  # pragma: no cover - lxml/xsd availability
+            notes.append(f"kbl_validation: unavailable ({error})")
 
         spice_text = graph_to_spice(graph, source_name=ctx.source_path.name)
         spice_path = schematic_dir / f"{ctx.source_path.stem}.cir"
@@ -440,8 +470,11 @@ class SchematicExtractor(Extractor):
         structured["schematic"] = {
             "graph": graph_path.relative_to(ctx.bundle_dir).as_posix(),
             "kicadRoot": kicad_root_rel,
+            "kblStandard": "VDA KBL 2.4 SR-1",
+            "kblSchemaValid": kbl_schema_valid,
             "netlist": netlist_path.relative_to(ctx.bundle_dir).as_posix(),
             "edml": edml_path.relative_to(ctx.bundle_dir).as_posix(),
+            "eevisionCsv": eevision_path.relative_to(ctx.bundle_dir).as_posix(),
             "xml": xml_path.relative_to(ctx.bundle_dir).as_posix(),
             "kbl": kbl_path.relative_to(ctx.bundle_dir).as_posix(),
             "spice": spice_path.relative_to(ctx.bundle_dir).as_posix(),
@@ -466,8 +499,11 @@ class SchematicExtractor(Extractor):
                 "schematic": {
                     "graph": graph_path.relative_to(ctx.bundle_dir).as_posix(),
                     "kicadRoot": kicad_root_rel,
+                    "kblStandard": "VDA KBL 2.4 SR-1",
+                    "kblSchemaValid": kbl_schema_valid,
                     "netlist": netlist_path.relative_to(ctx.bundle_dir).as_posix(),
                     "edml": edml_path.relative_to(ctx.bundle_dir).as_posix(),
+                    "eevisionCsv": eevision_path.relative_to(ctx.bundle_dir).as_posix(),
                     "xml": xml_path.relative_to(ctx.bundle_dir).as_posix(),
                     "kbl": kbl_path.relative_to(ctx.bundle_dir).as_posix(),
                     "spice": spice_path.relative_to(ctx.bundle_dir).as_posix(),
@@ -504,6 +540,106 @@ class SchematicExtractor(Extractor):
                     exc_info=True,
                 )
         return _minimal_structured(ctx)
+
+
+#: pdftocairo SVG header: width="612pt" height="792pt".
+_SVG_SIZE_RE = re.compile(
+    r'<svg[^>]*?width="([\d.]+)(?:pt)?"[^>]*?height="([\d.]+)(?:pt)?"', re.DOTALL
+)
+
+
+def _collect_page_sizes_pt(
+    svg_paths: list[Path], page_results: list[dict[str, Any]]
+) -> dict[int, tuple[float, float]]:
+    """Page sizes (pt) per page number: SVG headers + raster trace records."""
+    sizes: dict[int, tuple[float, float]] = {}
+    for page_no, svg_path in enumerate(svg_paths, start=1):
+        try:
+            match = _SVG_SIZE_RE.search(svg_path.read_text()[:2000])
+        except OSError:
+            continue
+        if match:
+            sizes[page_no] = (float(match.group(1)), float(match.group(2)))
+    for result in page_results:
+        page_no = int(result.get("__page__") or 1)
+        size = _result_page_size_pt(result)
+        if size and page_no not in sizes:
+            sizes[page_no] = size
+    return sizes
+
+
+def _stamp_page_sizes(
+    graph: dict[str, Any], sizes: dict[int, tuple[float, float]]
+) -> None:
+    """Record width/height (pt) on the graph's pages — the coordinate frame
+    every bbox/attachment lives in, needed by consumers that map back onto
+    page renders (vision pin reading, simulation, viewers)."""
+    for page in graph.get("pages") or []:
+        if not isinstance(page, dict):
+            continue
+        page_no = int(page.get("pageNumber") or page.get("page") or 0)
+        size = sizes.get(page_no)
+        if size and not page.get("width"):
+            page["width"], page["height"] = size
+
+
+def _enrich_connectivity(
+    graph: dict[str, Any],
+    *,
+    page_text_labels: dict[int, list[TextLabel]],
+    page_images: list[tuple[int, bytes]],
+    provider: Any,
+    ctx: ExtractionContext,
+    notes: list[str],
+) -> None:
+    """Connectivity identifiers + printed pin recovery, in place.
+
+    1. Wire ids for every net and conventional 1/2 pins for 2-terminal parts
+       (deterministic bookkeeping, marked ``assigned``).
+    2. Multi-pin devices get their PRINTED pin designators recovered:
+       text-layer reading first (vector PDFs, deterministic), vision crops
+       with marked attachment points for whatever remains (scans).
+    """
+    from docling_serve.extractors.connectivity_ids import (
+        assign_two_terminal_pins,
+        assign_wire_ids,
+    )
+    from docling_serve.extractors.pin_identification import (
+        assign_pins_from_text,
+        assign_pins_with_vision,
+    )
+
+    wire_ids = assign_wire_ids(graph)
+    pin_count = assign_two_terminal_pins(graph)
+    if wire_ids or pin_count:
+        notes.append(
+            f"connectivity_ids: {wire_ids} wire id(s), {pin_count} pin(s) assigned"
+        )
+
+    text_pins = assign_pins_from_text(graph, page_text_labels)
+    vision_pins = 0
+    if provider.enabled and page_images:
+        ctx.report_progress("schematic_identify_pins")
+        vision_pins = assign_pins_with_vision(
+            graph,
+            page_images,
+            understand=lambda prompt, system, png: _cached_understand_json(
+                provider, prompt=prompt, system=system, png_bytes=png
+            )[0],
+        )
+    if text_pins or vision_pins:
+        notes.append(
+            f"pin_identification: {text_pins} text-layer, {vision_pins} vision"
+        )
+
+    from docling_serve.extractors.connectivity_ids import record_connectivity_quality
+
+    quality = record_connectivity_quality(graph)
+    notes.append(
+        "connectivity_quality: "
+        f"{quality['pinnedCount']}/{quality['membershipCount']} pinned, "
+        f"{quality['unpinnedCount']} on the QA worklist"
+    )
 
 
 def _tenant_from_manifest_key(manifest_key: str | None) -> str | None:

@@ -45,11 +45,11 @@ def graph_to_kbl(graph: dict[str, Any], *, source_name: str) -> str:
     wire_part_id_by_net = _library_wires(root, nets)
 
     harness = _harness_header(root, graph, source_name)
-    connector_elements, contact_point_ids = _connector_occurrences(
+    connector_elements, contact_point_ids, contact_by_pin = _connector_occurrences(
         components, housing_ids, cavity_part_ids
     )
     wire_elements, connection_elements = _wires_and_connections(
-        nets, wire_part_id_by_net, contact_point_ids
+        nets, wire_part_id_by_net, contact_point_ids, contact_by_pin
     )
     # Harness children must follow the schema sequence order:
     # Connection before Connector_occurrence before General_wire_occurrence.
@@ -116,17 +116,28 @@ def _library_housings(
         count = cavity_counts.get(comp_id, 1)
         _text(slot, "Number_of_cavities", str(count))
         part_cavities: list[str] = []
-        pins = [p for p in component.get("pins") or [] if isinstance(p, dict)]
+        labels = _cavity_labels(component, count)
         for cavity_index in range(count):
             cavity = ET.SubElement(slot, "Cavities")
             cavity_id = f"{housing_id}_cav{cavity_index + 1}"
             cavity.set("id", cavity_id)
-            pin = pins[cavity_index] if cavity_index < len(pins) else None
-            number = (pin or {}).get("number") or (pin or {}).get("name")
-            _text(cavity, "Cavity_number", str(number or cavity_index + 1))
+            _text(cavity, "Cavity_number", labels[cavity_index])
             part_cavities.append(cavity_id)
         cavity_part_ids[comp_id] = part_cavities
     return housing_ids, cavity_part_ids
+
+
+def _cavity_labels(component: dict[str, Any], count: int) -> list[str]:
+    """Cavity/pin labels in slot order: real pin designators first, then
+    sequential fill — the SAME labels the connector occurrence's contact
+    points carry, so kbl2edb binds extremities to actual pins."""
+    pins = [p for p in component.get("pins") or [] if isinstance(p, dict)]
+    labels: list[str] = []
+    for index in range(count):
+        pin = pins[index] if index < len(pins) else None
+        number = (pin or {}).get("number") or (pin or {}).get("name")
+        labels.append(str(number or index + 1))
+    return labels
 
 
 def _library_wires(
@@ -178,10 +189,16 @@ def _connector_occurrences(
     components: list[dict[str, Any]],
     housing_ids: dict[str, str],
     cavity_part_ids: dict[str, list[str]],
-) -> tuple[list[ET.Element], dict[str, list[str]]]:
-    """Detached ``Connector_occurrence`` elements + contact point ids."""
+) -> tuple[list[ET.Element], dict[str, list[str]], dict[str, dict[str, str]]]:
+    """Detached ``Connector_occurrence`` elements + contact point ids.
+
+    Returns ``(elements, contact ids per component, pin-label -> contact id
+    per component)`` — the pin map is what lets a net membership carrying a
+    pin designator bind its connection extremity to the RIGHT cavity.
+    """
     connector_elements: list[ET.Element] = []
     contact_point_ids: dict[str, list[str]] = {}
+    contact_by_pin: dict[str, dict[str, str]] = {}
     for index, component in enumerate(components, start=1):
         comp_id = str(component.get("id") or f"C{index:04d}")
         occurrence = ET.Element("Connector_occurrence")
@@ -193,17 +210,22 @@ def _connector_occurrences(
             _text(occurrence, "Description", str(component["location"]))
         _text(occurrence, "Part", housing_ids[comp_id])
 
+        labels = _cavity_labels(component, len(cavity_part_ids[comp_id]))
         cavity_occs: list[str] = []
         contact_points: list[str] = []
-        for cavity_index, _cavity_part in enumerate(cavity_part_ids[comp_id], start=1):
+        pin_map: dict[str, str] = {}
+        for cavity_index, label in enumerate(labels, start=1):
             contact = ET.SubElement(occurrence, "Contact_points")
             contact_id = f"{occurrence_id}_cp{cavity_index}"
             contact.set("id", contact_id)
-            _text(contact, "Id", str(cavity_index))
+            # The contact's Id IS the pin designator, so EDB importers see
+            # real pin identities instead of bare slot indexes.
+            _text(contact, "Id", label)
             cavity_occ_id = f"{occurrence_id}_cavocc{cavity_index}"
             _text(contact, "Contacted_cavity", cavity_occ_id)
             contact_points.append(contact_id)
             cavity_occs.append(cavity_occ_id)
+            pin_map.setdefault(label, contact_id)
 
         slots = ET.SubElement(occurrence, "Slots")
         slots.set("id", f"{occurrence_id}_slotocc")
@@ -214,18 +236,20 @@ def _connector_occurrences(
             _text(cavity_occ, "Part", cavity_part)
 
         contact_point_ids[comp_id] = contact_points
-    return connector_elements, contact_point_ids
+        contact_by_pin[comp_id] = pin_map
+    return connector_elements, contact_point_ids, contact_by_pin
 
 
 def _wires_and_connections(
     nets: list[dict[str, Any]],
     wire_part_id_by_net: dict[str, str],
     contact_point_ids: dict[str, list[str]],
+    contact_by_pin: dict[str, dict[str, str]],
 ) -> tuple[list[ET.Element], list[ET.Element]]:
     """Detached ``General_wire_occurrence`` + ``Connection`` elements."""
     wire_elements: list[ET.Element] = []
     connection_elements: list[ET.Element] = []
-    used_contacts: dict[str, int] = {}
+    claimed_contacts: set[str] = set()
     for index, net in enumerate(nets, start=1):
         net_id = str(net.get("id") or f"N{index:04d}")
         wire_occurrence = ET.Element("General_wire_occurrence")
@@ -245,9 +269,15 @@ def _wires_and_connections(
         value.set("id", f"{wire_occ_id}_lenval")
         _text(value, "Unit_component", _UNIT_ID)
         _text(value, "Value_component", "0.0")
-        _text(wire_occurrence, "Wire_number", net.get("name") or net_id)
+        _text(
+            wire_occurrence,
+            "Wire_number",
+            net.get("wireId") or net.get("name") or net_id,
+        )
 
-        extremity_contacts = _claim_contacts(net, contact_point_ids, used_contacts)
+        extremity_contacts = _claim_contacts(
+            net, contact_point_ids, contact_by_pin, claimed_contacts
+        )
         if len(extremity_contacts) < 2:
             continue  # KBL connections need both ends; wire part still exported
 
@@ -271,9 +301,16 @@ def _wires_and_connections(
 def _claim_contacts(
     net: dict[str, Any],
     contact_point_ids: dict[str, list[str]],
-    used_contacts: dict[str, int],
+    contact_by_pin: dict[str, dict[str, str]],
+    claimed_contacts: set[str],
 ) -> list[str]:
-    """One contact point per net membership, claimed in cavity order."""
+    """One contact point per net membership — by PIN when the membership
+    carries a designator, sequential fallback otherwise.
+
+    Pin-aware claiming is what makes the EDB connectivity real: a node
+    recorded as ``U2:14`` binds extremity → contact point → cavity 14, not
+    whatever slot happened to be next.
+    """
     claimed: list[str] = []
     for node in net.get("nodes") or []:
         if not isinstance(node, dict) or not node.get("component"):
@@ -282,9 +319,14 @@ def _claim_contacts(
         available = contact_point_ids.get(comp_id) or []
         if not available:
             continue
-        slot_index = min(used_contacts.get(comp_id, 0), len(available) - 1)
-        used_contacts[comp_id] = slot_index + 1
-        claimed.append(available[slot_index])
+        pin = str(node.get("pin") or "").strip()
+        contact_id = contact_by_pin.get(comp_id, {}).get(pin) if pin else None
+        if contact_id is None or contact_id in claimed_contacts:
+            contact_id = next(
+                (c for c in available if c not in claimed_contacts), available[-1]
+            )
+        claimed_contacts.add(contact_id)
+        claimed.append(contact_id)
     return claimed
 
 

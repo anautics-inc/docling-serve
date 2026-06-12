@@ -359,13 +359,17 @@ def test_graph_to_edml_components_grounds_wires():
         ],
     }
     edml = graph_to_edml(graph, source_name="fixture.pdf")
-    assert 'Component V1 | Name="GUN CHARGING VALVE", "Location" = "RH SIDE STA 21", "PartNumber" = "KIDDE 870929"' in edml
-    assert 'Cavity 1 | Name="PIN A";' in edml
-    assert "Join A.PIN A -> W1;" in edml
-    assert "Eyelet E1" in edml
-    assert "Join 1 -> W1;" in edml
-    assert 'Wire W1 | Name="A8B22", "Gauge" = "22 AWG", "SignalType" = "control";' in edml
-    assert edml.endswith("// End of EDML\n")
+    # Spec-conformant output: wires declared first, IDs sanitized, names and
+    # part numbers as properties/attributes, pin designators as cavity ids.
+    assert edml.index("Wire N1 ") < edml.index("Component C0001")
+    assert 'Wire N1 | Name = "A8B22", "Gauge" = "22 AWG";' in edml
+    assert 'Component C0001 | Name = "V1", Imagedsp = "L,40,40"' in edml
+    assert '"Part No" = "KIDDE 870929"' in edml
+    assert '"Location" = "RH SIDE STA 21"' in edml
+    # "PIN A" is not ID-safe -> sanitized cavity id.
+    assert "Join A.PIN_A -> N1" in edml
+    # The ground stud still joins the wire through its own cavity.
+    assert "Component C0002" in edml
 
 
 # --------------------------------------------------------------------------- #
@@ -1969,3 +1973,280 @@ def test_symbol_map_uses_iec_style_defaults():
     definition, _pins = loaded
     # IEC 60617 resistor = rectangle body; the ANSI zigzag has no rectangle.
     assert "(rectangle" in definition
+
+
+# --------------------------------------------------------------------------- #
+# Connectivity identifiers (wire IDs + safe pin designators)                   #
+# --------------------------------------------------------------------------- #
+
+
+def test_assign_wire_ids_and_two_terminal_pins():
+    from docling_serve.extractors.connectivity_ids import (
+        assign_two_terminal_pins,
+        assign_wire_ids,
+    )
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor"},
+            {"id": "C2", "refDes": "U1", "type": "IC"},
+            {"id": "C3", "refDes": "D5", "type": "Display"},
+        ],
+        "nets": [
+            {"id": "N1", "name": None, "wireId": None, "nodes": [
+                {"component": "C1", "pin": None, "attachment": [90, 10]},
+                {"component": "C2", "pin": None},
+            ]},
+            {"id": "N2", "name": "SEG_A", "wireId": "A8B22", "nodes": [
+                {"component": "C1", "pin": None, "attachment": [10, 10]},
+                {"component": "C3", "pin": "1", "pinSource": "model"},
+            ]},
+        ],
+    }
+    assert assign_wire_ids(graph) == 1
+    assert graph["nets"][0]["wireId"] == "W001"
+    assert graph["nets"][0]["wireIdSource"] == "assigned"
+    # Printed wire id untouched.
+    assert graph["nets"][1]["wireId"] == "A8B22"
+    assert "wireIdSource" not in graph["nets"][1]
+
+    assert assign_two_terminal_pins(graph) == 2
+    # R1: leftmost attachment (x=10, in N2) is pin 1; the other is pin 2.
+    r1_n2 = graph["nets"][1]["nodes"][0]
+    r1_n1 = graph["nets"][0]["nodes"][0]
+    assert (r1_n2["pin"], r1_n1["pin"]) == ("1", "2")
+    assert r1_n1["pinSource"] == "assigned"
+    # IC stays unguessed; model-claimed pin untouched.
+    assert graph["nets"][0]["nodes"][1].get("pin") is None
+    assert graph["nets"][1]["nodes"][1]["pinSource"] == "model"
+    # Component pins seeded for cavity labeling.
+    assert graph["components"][0]["pins"] == [{"number": "1"}, {"number": "2"}]
+    # Idempotent.
+    assert assign_two_terminal_pins(graph) == 0
+
+
+def test_kbl_binds_extremities_to_pins_and_uses_wire_ids(tmp_path):
+    """Pin-carrying memberships bind to the matching cavity contact and the
+    wire number is the (assigned) wire id — still KBL 2.4 SR-1 schema-valid."""
+    from docling_serve.extractors.connectivity_ids import (
+        assign_two_terminal_pins,
+        assign_wire_ids,
+    )
+    from docling_serve.extractors.kbl import graph_to_kbl
+
+    graph = _revision_graph()
+    assign_wire_ids(graph)
+    assign_two_terminal_pins(graph)
+    kbl = graph_to_kbl(graph, source_name="fixture.pdf")
+    assert "<Wire_number>W001</Wire_number>" in kbl
+    # R1's contact point Ids are real pin designators now.
+    assert "<Id>1</Id>" in kbl and "<Id>2</Id>" in kbl
+
+    try:
+        from lxml import etree
+    except ImportError:
+        pytest.skip("lxml not installed")
+    xsd = Path(__file__).parent / "test_files" / "KBL24_SR1.xsd"
+    if not xsd.exists():
+        pytest.skip("KBL XSD not present")
+    schema = etree.XMLSchema(etree.parse(str(xsd)))
+    document = etree.fromstring(kbl.encode())
+    assert schema.validate(document), schema.error_log
+
+
+# --------------------------------------------------------------------------- #
+# Pin identification (text layer + vision crops)                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_assign_pins_from_text_layer():
+    from docling_serve.extractors.pin_identification import assign_pins_from_text
+
+    graph = {
+        "pages": [{"pageNumber": 1, "width": 612, "height": 792}],
+        "components": [
+            {"id": "C1", "refDes": "U2", "type": "IC", "bbox": [100, 100, 160, 200]},
+        ],
+        "nets": [
+            {"id": "N1", "page": 1, "nodes": [
+                {"component": "C1", "pin": None, "attachment": [100, 110]},
+                {"component": "C1", "pin": None, "attachment": [160, 190]},
+            ]},
+        ],
+    }
+    labels = {1: [
+        (102, 104, 112, 112, "14"),     # near first attachment
+        (150, 184, 158, 192, "VDD"),    # near second attachment
+        (120, 140, 140, 150, "U2"),     # the refDes — must never become a pin
+        (300, 300, 320, 310, "7"),      # far away — out of radius
+    ]}
+    assert assign_pins_from_text(graph, labels) == 2
+    nodes = graph["nets"][0]["nodes"]
+    assert nodes[0]["pin"] == "14" and nodes[0]["pinSource"] == "text-layer"
+    assert nodes[1]["pin"] == "VDD" and nodes[1]["pinSource"] == "text-layer"
+
+
+def test_assign_pins_with_vision_marks_and_applies(tmp_path):
+    from PIL import Image
+
+    from docling_serve.extractors.pin_identification import assign_pins_with_vision
+
+    page = Image.new("RGB", (612, 792), "white")
+    import io as _io
+
+    buffer = _io.BytesIO()
+    page.save(buffer, format="PNG")
+    graph = {
+        "pages": [{"pageNumber": 1, "width": 612, "height": 792}],
+        "components": [
+            {"id": "C1", "refDes": "U1", "type": "IC", "bbox": [100, 100, 200, 220]},
+        ],
+        "nets": [
+            {"id": "N1", "page": 1, "nodes": [
+                {"component": "C1", "pin": None, "attachment": [100, 120]},
+            ]},
+            {"id": "N2", "page": 1, "nodes": [
+                {"component": "C1", "pin": None, "attachment": [200, 200]},
+            ]},
+        ],
+    }
+    calls: list[str] = []
+
+    def fake_understand(prompt, system, png):
+        calls.append(prompt)
+        assert b"PNG" in png[:8]
+        return {"pins": [
+            {"marker": 1, "pin": "RA0"},
+            {"marker": 2, "pin": "totally invalid pin name"},
+        ]}
+
+    assigned = assign_pins_with_vision(graph, [(1, buffer.getvalue())], understand=fake_understand)
+    assert assigned == 1
+    assert graph["nets"][0]["nodes"][0]["pin"] == "RA0"
+    assert graph["nets"][0]["nodes"][0]["pinSource"] == "vision"
+    # Implausible token rejected; membership stays honest-null.
+    assert graph["nets"][1]["nodes"][0].get("pin") is None
+    assert len(calls) == 1  # both attachments of C1 went in ONE crop call
+
+
+def test_page_sizes_stamped_from_svg(tmp_path):
+    from docling_serve.extractors.schematic_extractor import (
+        _collect_page_sizes_pt,
+        _stamp_page_sizes,
+    )
+
+    svg = tmp_path / "schematic.svg"
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="612pt" height="792pt"></svg>')
+    sizes = _collect_page_sizes_pt([svg], [{"__page__": 2, "__page_size_pt__": (1224, 792)}])
+    assert sizes == {1: (612.0, 792.0), 2: (1224.0, 792.0)}
+    graph = {"pages": [{"pageNumber": 1}, {"pageNumber": 2}]}
+    _stamp_page_sizes(graph, sizes)
+    assert graph["pages"][0]["width"] == 612.0
+    assert graph["pages"][1]["height"] == 792.0
+
+
+def test_record_connectivity_quality_builds_qa_worklist():
+    from docling_serve.extractors.connectivity_ids import record_connectivity_quality
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor"},
+            {"id": "C2", "refDes": "U1", "type": "IC"},
+        ],
+        "nets": [
+            {"id": "N1", "wireId": "W001", "page": 1, "nodes": [
+                {"component": "C1", "pin": "1", "pinSource": "assigned"},
+                {"component": "C2", "pin": None, "attachment": [50, 60]},
+            ]},
+            {"id": "N2", "wireId": "W002", "page": 1, "nodes": [
+                {"component": "C2", "pin": "14", "pinSource": "vision"},
+            ]},
+        ],
+    }
+    quality = record_connectivity_quality(graph)
+    assert quality["membershipCount"] == 3
+    assert quality["pinnedCount"] == 2
+    assert quality["pinSourceCounts"] == {"assigned": 1, "vision": 1}
+    assert quality["unpinnedCount"] == 1
+    entry = quality["qaWorklist"][0]
+    assert entry["refDes"] == "U1" and entry["wireId"] == "W001"
+    assert entry["attachment"] == [50, 60]
+    assert graph["connectivityQuality"] is quality
+
+
+# --------------------------------------------------------------------------- #
+# EEvision delivery (EDML to spec + excel2edb CSV)                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_graph_to_edml_follows_language_spec():
+    """Wires declared before Joins, statements end with ';', pins are cavities,
+    DIN symbols and part numbers ride as properties/attributes."""
+    from docling_serve.extractors.edml import graph_to_edml
+
+    graph = _revision_graph()
+    graph["nets"][0]["wireId"] = "W001"
+    graph["nets"][0]["nodes"][0]["pin"] = "1"
+    graph["nets"][0]["nodes"][1]["pin"] = "A"
+    edml = graph_to_edml(graph, source_name="fixture.pdf")
+
+    # Declaration order: every Wire statement precedes the first Component.
+    assert edml.index("Wire W001") < edml.index("Component C1")
+    # Statements end with semicolons.
+    assert 'Wire W001 | Name = "A8B22"' in edml
+    assert edml.count(";") >= 8
+    # Pin designators are the cavity ids and appear in Joins.
+    assert "Join A.1 -> W001" in edml
+    assert "Join A.A -> W001" in edml
+    # DIN 40719 symbol for the valve (-> L inductor-class coil symbol).
+    assert 'Imagedsp = "L,40,40"' in edml
+    # Part number rides as a quoted attribute, not the display name.
+    assert '"Part No" = "WRONG-1"' in edml
+    assert 'Name = "V1"' in edml
+
+
+def test_graph_to_eevision_csv_excel2edb_contract():
+    """One row per extremity pair, multi-term nets repeat the wire id,
+    repeated component data only on first occurrence, no-wire rows for
+    unconnected parts."""
+    import csv as _csv
+    import io as _io
+
+    from docling_serve.extractors.eevision import graph_to_eevision_csv
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "R1", "type": "resistor", "partNumber": "RES-1"},
+            {"id": "C2", "refDes": "U1", "type": "IC"},
+            {"id": "C3", "refDes": "K9", "type": "relay"},
+            {"id": "C4", "refDes": "X1", "type": "connector"},  # unconnected
+        ],
+        "nets": [
+            # 3 memberships -> 2 rows with the same wire id (multi-term form).
+            {"id": "N1", "wireId": "W001", "name": "A68A20N", "nodes": [
+                {"component": "C1", "pin": "1"},
+                {"component": "C2", "pin": "14"},
+                {"component": "C3", "pin": None},
+            ]},
+            {"id": "N2", "wireId": "W002", "name": "28VDC BUS", "nodes": [
+                {"component": "C1", "pin": "2"},
+                {"component": "C3", "pin": None},
+            ]},
+        ],
+    }
+    text = graph_to_eevision_csv(graph, source_name="fixture.pdf")
+    rows = list(_csv.DictReader(_io.StringIO(text)))
+
+    w1 = [r for r in rows if r["Wire"] == "W001"]
+    assert len(w1) == 2  # ceil(3/2) extremity-pair rows
+    assert w1[0]["Type"] == "GROUND"  # MIL …N wire id classifies as ground
+    assert w1[0]["A-Cav"] == "1" and w1[0]["B-Cav"] == "14"
+    assert w1[1]["A-Comp"] == "C3" and w1[1]["A-Cav"].startswith("c")
+    # Repeated-values rule: component described once, later occurrences empty.
+    assert w1[0]["A-CompName"] == "R1" and w1[0]["A-Comp: imagedsp"] == "R,40,40"
+    w2 = [r for r in rows if r["Wire"] == "W002"][0]
+    assert w2["Type"] == "POWER"
+    assert w2["A-Comp"] == "C1" and w2["A-CompName"] == ""  # already described
+    # Unconnected component appears as a no-wire row.
+    nowire = [r for r in rows if not r["Wire"]]
+    assert len(nowire) == 1 and nowire[0]["A-CompName"] == "X1"

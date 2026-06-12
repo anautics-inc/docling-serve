@@ -1,0 +1,12 @@
+Wire,Wire: color,A-Cav,A-CavName,A-CavType,A-Conn,A-ConnName,A-ConnType,A-Comp,A-CompType,B-Cav,B-CavName,B-CavType,B-Conn,B-ConnName,B-ConnType,B-Comp,B-CompType,B-Comp: color,B-Comp: imagedsp,MC,MCType,MCParent
+W1,,1,1,,A,A,,C1,ecu,1,1,,B,B,female:C,I1,inliner,,,MC_inner1,twshielded,MC_outer
+W2,,2,2,,A,,,C1,,2,2,,B,,,I1,,,,MC_inner1,,
+W3,,3,3,,A,,,C1,,3,3,,B,,,I1,,,,MC_inner2,twisted,MC_outer
+W4,,4,4,,A,,,C1,,4,4,,B,,,I1,,,,MC_inner2,,
+SHL,,Y4,,halfdot,A,,,C1,,Y4,,halfdot:,B,,,I1,,,,MC_outer,shield,
+W5,#ff0000 #0000ff,1,1,,C,C,male:B,I1,,,,,S1,S1,splice,,,,,,,
+W6,#ff0000 #0000ff,2,2,,C,,,I1,,,,,S1,,,,,,,,,
+W7,#ff0000 #0000ff,,,,S1,,,,,1,1,,R0,,invisible,Sensor,ecu,#8888ff,"P,40,40",,,
+W8,#00aa00 #ffa500,3,3,,C,,,I1,,Y0,,,E1,E1,eyelet,,,,,,,
+W9,#00aa00 #ffa500,4,4,,C,,,I1,,Y1,,,E1,,,,,,,,,
+W10,#00aa00 #ffa500,Y2,,,E1,,,,,2,2,,R0,,,Sensor,,,,,,

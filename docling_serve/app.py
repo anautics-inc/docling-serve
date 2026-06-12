@@ -90,6 +90,7 @@ from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
 from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends
+from docling_serve.identity import RequestIdentity
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
     get_metrics_endpoint_content,
@@ -377,6 +378,7 @@ def create_app():  # noqa: C901
         orchestrator: BaseOrchestrator,
         request: ConvertDocumentsRequest | GenericChunkDocumentsRequest,
         tenant_id: str | None = None,
+        identity: RequestIdentity | None = None,
     ) -> Task:
         sources: list[TaskSource] = []
         for s in request.sources:
@@ -414,6 +416,12 @@ def create_app():  # noqa: C901
             )
         else:
             _log.warning("[TENANT_ID] No tenant_id provided, will use default")
+        # Caller identity for worker-side LLM spend attribution and audit.
+        if identity is not None:
+            if identity.actor_id:
+                metadata["actor_id"] = identity.actor_id
+            if identity.request_id:
+                metadata["request_id"] = identity.request_id
 
         task = await orchestrator.enqueue(
             task_type=task_type,
@@ -442,6 +450,7 @@ def create_app():  # noqa: C901
         target: TargetRequest,
         callbacks: list[CallbackSpec] | None = None,
         tenant_id: str | None = None,
+        identity: RequestIdentity | None = None,
     ) -> Task:
         _log.info(
             f"[TENANT_ID] _enque_file called with tenant_id='{tenant_id}', "
@@ -469,6 +478,12 @@ def create_app():  # noqa: C901
         metadata = {}
         if tenant_id:
             metadata["tenant_id"] = tenant_id
+        # Caller identity for worker-side LLM spend attribution and audit.
+        if identity is not None:
+            if identity.actor_id:
+                metadata["actor_id"] = identity.actor_id
+            if identity.request_id:
+                metadata["request_id"] = identity.request_id
 
         task = await orchestrator.enqueue(
             task_type=task_type,
@@ -495,6 +510,24 @@ def create_app():  # noqa: C901
             f"(header_value: '{tenant_id_header}')"
         )
         return tenant_id
+
+    def _caller_identity(request: Request) -> RequestIdentity | None:
+        """Authenticated caller forwarded by the captify gateway, if present.
+
+        The gateway (pytology) Cognito-validates the user and forwards
+        identity headers; this service trusts them on the private interface.
+        Identity rides on task metadata so worker-side model calls are
+        attributed to the originating user/tenant in LiteLLM spend logs.
+        """
+        headers = request.headers
+        tenant_id = headers.get(docling_serve_settings.eng_ray_tenant_id_header)
+        actor_id = headers.get(docling_serve_settings.actor_id_header)
+        request_id = headers.get(docling_serve_settings.request_id_header)
+        if not (tenant_id or actor_id or request_id):
+            return None
+        return RequestIdentity(
+            tenant_id=tenant_id, actor_id=actor_id, request_id=request_id
+        )
 
     async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
         start_time = time.monotonic()
@@ -694,12 +727,18 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        identity: Annotated[
+            RequestIdentity | None, Depends(_caller_identity)
+        ] = None,
     ):
         conversion_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
+            orchestrator=orchestrator,
+            request=conversion_request,
+            tenant_id=tenant_id,
+            identity=identity,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -749,6 +788,9 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        identity: Annotated[
+            RequestIdentity | None, Depends(_caller_identity)
+        ] = None,
     ):
         options = _prepare_convert_options(options)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -764,6 +806,7 @@ def create_app():  # noqa: C901
             target=target,
             callbacks=[],
             tenant_id=tenant_id,
+            identity=identity,
         )
         completed = await _wait_task_complete(
             orchestrator=orchestrator, task_id=task.task_id
@@ -803,6 +846,9 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        identity: Annotated[
+            RequestIdentity | None, Depends(_caller_identity)
+        ] = None,
     ):
         conversion_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -810,7 +856,10 @@ def create_app():  # noqa: C901
             f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
         )
         task = await _enque_source(
-            orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
+            orchestrator=orchestrator,
+            request=conversion_request,
+            tenant_id=tenant_id,
+            identity=identity,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -842,6 +891,9 @@ def create_app():  # noqa: C901
         x_tenant_id: Annotated[
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
+        identity: Annotated[
+            RequestIdentity | None, Depends(_caller_identity)
+        ] = None,
     ):
         options = _prepare_convert_options(options)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -859,6 +911,7 @@ def create_app():  # noqa: C901
             target=target,
             callbacks=[],
             tenant_id=tenant_id,
+            identity=identity,
         )
         task_queue_position = await orchestrator.get_queue_position(
             task_id=task.task_id
@@ -894,6 +947,9 @@ def create_app():  # noqa: C901
                 str | None,
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
+            identity: Annotated[
+                RequestIdentity | None, Depends(_caller_identity)
+            ] = None,
         ):
             request = _prepare_chunk_request(request)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -901,7 +957,10 @@ def create_app():  # noqa: C901
                 f"[TENANT_ID] chunk_source_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             task = await _enque_source(
-                orchestrator=orchestrator, request=request, tenant_id=tenant_id
+                orchestrator=orchestrator,
+                request=request,
+                tenant_id=tenant_id,
+                identity=identity,
             )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
@@ -958,6 +1017,9 @@ def create_app():  # noqa: C901
                 str | None,
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
+            identity: Annotated[
+                RequestIdentity | None, Depends(_caller_identity)
+            ] = None,
         ):
             convert_options = _prepare_convert_options(convert_options)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -977,6 +1039,7 @@ def create_app():  # noqa: C901
                 target=target,
                 callbacks=[],
                 tenant_id=tenant_id,
+                identity=identity,
             )
             task_queue_position = await orchestrator.get_queue_position(
                 task_id=task.task_id
@@ -1011,6 +1074,9 @@ def create_app():  # noqa: C901
                 str | None,
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
+            identity: Annotated[
+                RequestIdentity | None, Depends(_caller_identity)
+            ] = None,
         ):
             request = _prepare_chunk_request(request)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -1018,7 +1084,10 @@ def create_app():  # noqa: C901
                 f"[TENANT_ID] chunk_source ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             task = await _enque_source(
-                orchestrator=orchestrator, request=request, tenant_id=tenant_id
+                orchestrator=orchestrator,
+                request=request,
+                tenant_id=tenant_id,
+                identity=identity,
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id
@@ -1093,6 +1162,9 @@ def create_app():  # noqa: C901
                 str | None,
                 Header(alias=docling_serve_settings.eng_ray_tenant_id_header),
             ] = None,
+            identity: Annotated[
+                RequestIdentity | None, Depends(_caller_identity)
+            ] = None,
         ):
             convert_options = _prepare_convert_options(convert_options)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
@@ -1112,6 +1184,7 @@ def create_app():  # noqa: C901
                 target=target,
                 callbacks=[],
                 tenant_id=tenant_id,
+                identity=identity,
             )
             completed = await _wait_task_complete(
                 orchestrator=orchestrator, task_id=task.task_id

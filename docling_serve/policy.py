@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
+import shutil
+import sys
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
@@ -30,7 +33,11 @@ def build_service_policy(settings: DoclingServeSettings) -> ServicePolicy:
     ocr_factory = get_ocr_factory(
         allow_external_plugins=settings.allow_external_plugins
     )
-    registered_ocr_presets = {str(kind) for kind in ocr_factory.registered_kind}
+    registered_ocr_presets = {
+        str(kind)
+        for kind in ocr_factory.registered_kind
+        if ocr_preset_available(str(kind), settings)
+    }
     if settings.allowed_ocr_presets is None:
         allowed_ocr_presets = registered_ocr_presets
     else:
@@ -46,14 +53,44 @@ def build_service_policy(settings: DoclingServeSettings) -> ServicePolicy:
     )
 
 
+def ocr_preset_available(preset: str, settings: DoclingServeSettings) -> bool:
+    if preset in {"auto", "rapidocr"}:
+        return importlib.util.find_spec("rapidocr") is not None
+    if preset == "easyocr":
+        return importlib.util.find_spec("easyocr") is not None
+    if preset == "tesserocr":
+        return importlib.util.find_spec("tesserocr") is not None
+    if preset == "tesseract":
+        return shutil.which("tesseract") is not None
+    if preset == "ocrmac":
+        return sys.platform == "darwin" and importlib.util.find_spec("ocrmac") is not None
+    if preset == "kserve_v2_ocr":
+        return settings.enable_remote_services
+    return True
+
+
 def normalize_convert_options(
     options: ConvertDocumentsOptions, policy: ServicePolicy
 ) -> ConvertDocumentsOptions:
-    if options.document_timeout is not None:
+    updates = {}
+
+    if options.document_timeout is None:
+        updates["document_timeout"] = policy.max_document_timeout
+
+    if not options.do_picture_description:
+        updates.update(
+            {
+                "picture_description_preset": None,
+                "picture_description_custom_config": None,
+                "picture_description_local": None,
+                "picture_description_api": None,
+            }
+        )
+
+    if not updates:
         return options
-    return options.model_copy(
-        update={"document_timeout": policy.max_document_timeout}, deep=True
-    )
+
+    return options.model_copy(update=updates, deep=True)
 
 
 def normalize_convert_request(

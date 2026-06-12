@@ -42,8 +42,10 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf -y install --best --nodocs --setopt=install_weak_deps=False dnf-plugins-core && \
     dnf config-manager --best --nodocs --setopt=install_weak_deps=False --save && \
     dnf config-manager --enable crb && \
+    ( dnf -y install epel-release || dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm ) && \
+    dnf config-manager --enable epel && \
     dnf -y update && \
-    dnf install -y $(cat /tmp/os-packages.txt) && \
+    dnf install -y $(grep -vE '^\s*#' /tmp/os-packages.txt) && \
     dnf -y clean all && \
     rm -rf /var/cache/dnf
 

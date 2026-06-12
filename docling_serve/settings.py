@@ -126,6 +126,17 @@ class DoclingServeSettings(BaseSettings):
     allow_custom_ocr_config: bool = False
     show_version_info: bool = True
     enable_management_endpoints: bool = False
+    deep_document_s3_bucket: str = ""
+    deep_document_s3_prefix_template: str = "documents/{tenant_id}/docling/{task_id}"
+    deep_document_s3_region: str | None = None
+    deep_document_service_env_file: str = ""
+    # Buckets a caller may target via the ``deep_s3_bucket`` form field. The
+    # server-configured ``deep_document_s3_bucket`` is always allowed implicitly.
+    # When empty, request-supplied buckets that differ from the server default
+    # are rejected (secure default) — this prevents a caller from making the
+    # service write its processed output to an arbitrary bucket using the
+    # service's own AWS credentials (confused-deputy).
+    deep_document_s3_allowed_buckets: list[str] | None = None
 
     # === LiteLLM proxy (shared LLM transport) ===
     # All model calls — vision passes and knowledge-graph extraction — route

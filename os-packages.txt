@@ -6,3 +6,6 @@ leptonica-devel
 libglvnd-glx
 glib2
 openssl-fips-provider
+# mdbtools provides mdb-export/mdb-schema/mdb-tables, used by the Access (.mdb/
+# .accdb) extractor. Requires EPEL (enabled in the Containerfile).
+mdbtools

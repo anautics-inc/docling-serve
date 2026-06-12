@@ -55,6 +55,9 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi>=0.57b0,<0.58",
     "opentelemetry-exporter-prometheus>=0.57b0",
     "prometheus-client>=0.21.0",
+    # Skeleton-based centerline vectorization of SCANNED schematic pages
+    # (extractors/raster_lines.py); cv2 itself arrives via the OCR stack.
+    "scikit-image>=0.24",
 ]
 
 [project.optional-dependencies]

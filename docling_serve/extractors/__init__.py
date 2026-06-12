@@ -20,6 +20,7 @@ from docling_serve.extractors.base import (
 )
 from docling_serve.extractors.docling_extractor import DoclingExtractor
 from docling_serve.extractors.pptx_extractor import PptxExtractor
+from docling_serve.extractors.schematic_extractor import SchematicExtractor
 from docling_serve.extractors.xfa_extractor import XfaFormExtractor
 
 # Most specific first; DoclingExtractor is the catch-all fallback.
@@ -28,6 +29,7 @@ from docling_serve.extractors.xfa_extractor import XfaFormExtractor
 _REGISTRY: list[Extractor] = [
     XfaFormExtractor(),
     AccessExtractor(),
+    SchematicExtractor(),
     PptxExtractor(),
 ]
 
@@ -70,6 +72,7 @@ __all__ = [
     "Extractor",
     "ExtractorResult",
     "PptxExtractor",
+    "SchematicExtractor",
     "XfaFormExtractor",
     "registered_extractors",
     "select_extractor",

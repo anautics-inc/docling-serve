@@ -1,0 +1,5 @@
+* PROVISIONAL first-order relay-coil model - replace with vendor data
+.subckt LEACH908973P coil_a coil_b
+L1 coil_a mid 120m
+R1 mid coil_b 220
+.ends

@@ -1,0 +1,5 @@
+* PROVISIONAL first-order solenoid model - replace with vendor data
+.subckt KIDDE870929 coil_a coil_b
+L1 coil_a mid 50m
+R1 mid coil_b 28
+.ends

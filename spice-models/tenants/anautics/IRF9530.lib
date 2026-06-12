@@ -1,0 +1,2 @@
+* PROVISIONAL generic P-MOSFET - replace with vendor data
+.model IRF9530 PMOS(VTO=-3.7 KP=8)

@@ -5,10 +5,12 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import re
 import shutil
+import threading
 import time
 from collections import Counter
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated
@@ -265,6 +267,54 @@ class GraphExtractResponse(BaseModel):
     extractedModels: int | None = None
     #: Populated when extraction was skipped (e.g. unconfigured); empty graph returned.
     note: str | None = None
+
+
+class SchematicBundleRequest(BaseModel):
+    """Locate a published schematic extraction bundle in S3."""
+
+    prefix: str = Field(description="Bundle prefix (e.g. tenants/<t>/document-extractions/<id>/v1)")
+    bucket: str | None = Field(default=None, description="Bucket; default deep-extraction bucket")
+
+
+class SchematicReviseRequest(SchematicBundleRequest):
+    """Apply user edits to a schematic bundle and regenerate its artifacts."""
+
+    edits: dict = Field(
+        description='{"components": [{"id", refDes?, partNumber?, value?, type?, delete?}], '
+        '"nets": [{"id", name?, delete?}]}'
+    )
+
+
+class SchematicCheckResponse(BaseModel):
+    """CAD-style delivery check report for a schematic bundle."""
+
+    checks: list[dict] = Field(default_factory=list)
+    passed: bool = True
+    applied: dict | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class SchematicSimulateRequest(SchematicBundleRequest):
+    """Run a DC operating-point simulation on a schematic bundle."""
+
+    sources: list[dict] = Field(
+        default_factory=list,
+        description='Stimulus overrides: [{"net": "A12C18", "volts": 28}]. '
+        "Empty uses auto-detected supply nets.",
+    )
+
+
+class SchematicSimulateResponse(BaseModel):
+    """Classification + real ngspice DC solve results."""
+
+    ok: bool = False
+    classification: dict = Field(default_factory=dict)
+    supplies: list[dict] = Field(default_factory=list)
+    grounds: list[str] = Field(default_factory=list)
+    nodeVoltages: dict[str, float] = Field(default_factory=dict)
+    sourceCurrents: dict[str, float] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    engine: str = "ngspice"
 
 
 ##################################
@@ -927,6 +977,139 @@ def create_app():  # noqa: C901
                 note=str(err),
             )
         return GraphExtractResponse(**payload)
+
+    # Backpressure for the schematic check/revise plane: each call shells out
+    # to kicad-cli + ngspice and round-trips a bundle through S3, so a burst
+    # would starve the conversion workers. Saturation returns 429 (retryable)
+    # instead of queueing unbounded work.
+    schematic_jobs = threading.BoundedSemaphore(
+        int(os.getenv("DOCLING_SERVE_SCHEMATIC_MAX_CONCURRENCY", "2"))
+    )
+
+    @contextmanager
+    def _schematic_slot():
+        if not schematic_jobs.acquire(blocking=False):
+            raise HTTPException(
+                status_code=429,
+                detail="Schematic check/revise capacity is busy; retry shortly.",
+                headers={"Retry-After": "5"},
+            )
+        try:
+            yield
+        finally:
+            schematic_jobs.release()
+
+    # CAD-style "delivery check" for a published schematic bundle: graph
+    # integrity, KiCad open/ERC, netlist, KBL XSD, XML, ngspice — the same
+    # acceptance gate CAD models get before a delivery is accepted.
+    @app.post("/v1/schematic/check", tags=["schematic"])
+    def schematic_check(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: SchematicBundleRequest,
+    ) -> SchematicCheckResponse:
+        from docling_serve.deep_document.s3_publisher import (
+            default_bucket,
+            ensure_bucket_allowed,
+        )
+        from docling_serve.extractors.schematic_revision import check_schematic_bundle
+
+        bucket = (body.bucket or default_bucket()).strip()
+        ensure_bucket_allowed(bucket)
+        with _schematic_slot():
+            try:
+                checks = check_schematic_bundle(bucket, body.prefix)
+            except (FileNotFoundError, ValueError) as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+        return SchematicCheckResponse(
+            checks=[c.as_dict() for c in checks],
+            passed=all(c.status != "fail" for c in checks),
+        )
+
+    # Apply browser edits to a schematic bundle: fold the user's component/
+    # net corrections into the graph, regenerate every derived artifact
+    # (netlist, EDML, XML, KBL, SPICE, KiCad documents + renders), republish
+    # to S3, and return the post-edit delivery-check report.
+    @app.post("/v1/schematic/revise", tags=["schematic"])
+    def schematic_revise(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: SchematicReviseRequest,
+    ) -> SchematicCheckResponse:
+        from docling_serve.deep_document.s3_publisher import (
+            default_bucket,
+            ensure_bucket_allowed,
+        )
+        from docling_serve.extractors.schematic_revision import revise_schematic_bundle
+
+        bucket = (body.bucket or default_bucket()).strip()
+        ensure_bucket_allowed(bucket)
+        with _schematic_slot():
+            try:
+                outcome = revise_schematic_bundle(bucket, body.prefix, body.edits)
+            except (FileNotFoundError, ValueError) as error:
+                raise HTTPException(status_code=404, detail=str(error)) from error
+        return SchematicCheckResponse(
+            checks=[c.as_dict() for c in outcome.checks],
+            passed=all(c.status != "fail" for c in outcome.checks),
+            applied=outcome.applied,
+            notes=outcome.notes,
+        )
+
+    # DC operating-point simulation of an extracted schematic: classify the
+    # circuit kind, auto-detect (or accept) supply/ground nets, run a REAL
+    # ngspice solve over the bundle's netlist (catalog + inferred models),
+    # and return node voltages — "energize this wire, what's live?".
+    @app.post("/v1/schematic/simulate", tags=["schematic"])
+    def schematic_simulate(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: SchematicSimulateRequest,
+    ) -> SchematicSimulateResponse:
+        import dataclasses
+        import json as _json
+
+        import boto3
+
+        from docling_serve.deep_document.s3_publisher import (
+            default_bucket,
+            ensure_bucket_allowed,
+        )
+        from docling_serve.extractors.spice_simulation import simulate_graph
+
+        bucket = (body.bucket or default_bucket()).strip()
+        ensure_bucket_allowed(bucket)
+        prefix = body.prefix.strip().strip("/")
+        with _schematic_slot():
+            client = boto3.client("s3")
+            try:
+                graph = _json.loads(
+                    client.get_object(
+                        Bucket=bucket, Key=f"{prefix}/schematic/schematic-graph.json"
+                    )["Body"].read()
+                )
+            except Exception as error:
+                raise HTTPException(
+                    status_code=404, detail=f"schematic graph not found: {error}"
+                ) from error
+            # Tenant scoping for model resolution, mirroring revise.
+            source = graph.setdefault("source", {})
+            if not source.get("tenantId"):
+                tenant = re.search(r"(?:^|/)tenants/([^/]+)/", prefix)
+                if tenant:
+                    source["tenantId"] = tenant.group(1)
+            result = simulate_graph(
+                graph,
+                source_name=str(source.get("originalFileName") or "schematic.pdf"),
+                sources=body.sources,
+            )
+        return SchematicSimulateResponse(
+            ok=result.ok,
+            classification=dataclasses.asdict(result.classification),
+            supplies=result.supplies,
+            grounds=result.grounds,
+            nodeVoltages=result.nodeVoltages,
+            sourceCurrents=result.sourceCurrents,
+            warnings=result.warnings,
+            engine=result.engine,
+        )
 
     # Convert a document from URL(s)
     @app.post(

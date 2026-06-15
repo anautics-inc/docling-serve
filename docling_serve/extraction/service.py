@@ -113,12 +113,20 @@ def assemble_document_bundle(
                 enhancement_manifest[key] = value
         write_json(document_json, document)
 
+    # Pre-render one self-contained SVG per slide from the final geometry so the bundle ships a
+    # ready preview (notebook reference overlay, list/card thumbnails) — no on-view LibreOffice
+    # rasterization. Slide decks only; other unit types have no slide geometry to render.
+    units = (structured.get("document") or {}).get("units") or []
+    if _is_slide_deck(structured):
+        from docling_serve.deep_document.slide_svg import write_slide_svgs
+
+        write_slide_svgs(units, media_dir=media_dir)
+
     media_files = (
         sorted(p.relative_to(bundle_dir).as_posix() for p in media_dir.glob("*"))
         if media_dir.exists()
         else []
     )
-    units = (structured.get("document") or {}).get("units") or []
 
     manifest: dict[str, Any] = {
         "schemaVersion": "1.0",
@@ -153,6 +161,22 @@ def assemble_document_bundle(
         manifest[key] = value
     write_json(bundle_dir / "extraction.json", manifest)
     return manifest
+
+
+def _is_slide_deck(structured: dict[str, Any]) -> bool:
+    """True when the structured document is a slide deck with per-slide geometry to render."""
+    document = structured.get("document") or {}
+    if str(document.get("unitType") or "") == "slide":
+        return True
+    for unit in document.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if str(unit.get("unitType") or "") == "slide":
+            return True
+        px = (((unit.get("render") or {}).get("size") or {}).get("px")) or {}
+        if px.get("width") and px.get("height"):
+            return True
+    return False
 
 
 def copy_first(

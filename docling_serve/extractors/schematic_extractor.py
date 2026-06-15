@@ -81,7 +81,8 @@ USER_PROMPT = (
     '  "imageSize": {"w": int, "h": int},\n'
     '  "titleBlock": {"title": str|null, "drawingNumber": str|null, '
     '"revision": str|null, "sheet": str|null, "date": str|null, '
-    '"author": str|null, "notes": [str]},\n'
+    '"author": str|null, "drawnBy": str|null, "company": str|null, '
+    '"tool": str|null, "notes": [str]},\n'
     '  "components": [{"refDes": str|null, "type": str|null, "value": str|null, '
     '"partNumber": str|null, "location": str|null, "parentComponent": str|null, '
     '"description": str|null, "confidence": number|null, "bbox": [x0, y0, x1, y1], '
@@ -112,6 +113,12 @@ USER_PROMPT = (
     "wire or line. Name nets from the drawing where labeled (e.g. GND, +28V, "
     'SIGNAL_A); set "wireId", "gauge", and "signalType" (power|ground|signal|'
     "data|control) when the drawing prints them; otherwise null.\n"
+    "- The title block usually sits in a corner (often bottom-right): "
+    'transcribe its fields VERBATIM — "title" (drawing/project name), '
+    '"sheet" (e.g. 1/1), "company", "drawnBy"/"author", "tool" (the EDA '
+    'package, e.g. KiCad, EasyEDA, Altium), "date", "revision". Copy the '
+    "characters you actually see even when the font is decorative; do not "
+    "normalise or guess a likely name.\n"
     "- List every ground stud/eyelet/symbol under groundPoints.\n"
     "- Every node's refDes must match a component you listed (or its description "
     "when refDes is null).\n"
@@ -631,6 +638,36 @@ def _enrich_connectivity(
         notes.append(
             f"pin_identification: {text_pins} text-layer, {vision_pins} vision"
         )
+
+    # Value / part-number recovery: the whole-page pass only enumerates a
+    # fraction of a dense sheet's components with values; the detection passes
+    # box the rest but carry no value or part number. Re-read each such
+    # component's printed labels from an isolated crop so the artifact carries
+    # real values, not nulls (the measured #1 field-coverage gap).
+    from docling_serve.extractors.component_identity import (
+        reconcile_value_part_number,
+        recover_component_identity,
+    )
+
+    if provider.enabled and page_images:
+        ctx.report_progress("schematic_recover_values")
+        recovered = recover_component_identity(
+            graph,
+            page_images,
+            understand=lambda prompt, system, png: _cached_understand_json(
+                provider, prompt=prompt, system=system, png_bytes=png
+            )[0],
+            source_path=ctx.resolve_source_file(),
+        )
+        if any(recovered.values()):
+            notes.append(
+                "value_recovery: "
+                f"{recovered['values']} value(s), "
+                f"{recovered['partNumbers']} part number(s) from crops"
+            )
+    reconciled = reconcile_value_part_number(graph)
+    if reconciled:
+        notes.append(f"value_reconcile: {reconciled} stale value(s) cleared")
 
     from docling_serve.extractors.connectivity_ids import record_connectivity_quality
 

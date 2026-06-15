@@ -43,7 +43,17 @@
           "refDes": { "type": ["string", "null"] },
           "type": { "type": ["string", "null"] },
           "value": { "type": ["string", "null"] },
+          "valueSource": {
+            "type": ["string", "null"],
+            "description": "Provenance of value: 'vision-crop' when recovered from a per-component crop, otherwise the whole-page model pass."
+          },
+          "value_was": {
+            "type": ["string", "null"],
+            "description": "Prior value cleared during reconciliation (it named a different part than partNumber); kept for audit."
+          },
+          "reviewNote": { "type": ["string", "null"] },
           "partNumber": { "type": ["string", "null"] },
+          "partNumberSource": { "type": ["string", "null"] },
           "location": { "type": ["string", "null"] },
           "parentComponent": { "type": ["string", "null"] },
           "description": { "type": ["string", "null"] },

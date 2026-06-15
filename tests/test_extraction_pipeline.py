@@ -2145,6 +2145,104 @@ def test_page_sizes_stamped_from_svg(tmp_path):
     assert graph["pages"][1]["height"] == 792.0
 
 
+def _blank_page_png(width: int = 612, height: int = 792) -> bytes:
+    import io as _io
+
+    from PIL import Image
+
+    buffer = _io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_recover_component_identity_fills_values_and_part_numbers():
+    """Detection-only components (bbox, no value) get their printed value and
+    part number read back from a per-component crop; nulls only, with
+    provenance, and the model-facing render is used when no source PDF given."""
+    from docling_serve.extractors.component_identity import recover_component_identity
+
+    graph = {
+        "pages": [{"pageNumber": 1, "width": 612, "height": 792}],
+        "components": [
+            {"id": "C1", "refDes": "R7", "type": "resistor", "bbox": [100, 100, 112, 116]},
+            {"id": "C2", "refDes": "U3", "type": "IC", "bbox": [200, 200, 260, 280]},
+            # Already valued: never re-read, never overwritten.
+            {"id": "C3", "refDes": "R1", "type": "resistor", "value": "10k", "bbox": [10, 10, 22, 26]},
+            # No bbox: cannot be cropped, skipped.
+            {"id": "C4", "refDes": "R9", "type": "resistor"},
+        ],
+    }
+    crops: list[str] = []
+
+    def fake_understand(prompt, system, png):
+        assert b"PNG" in png[:8]
+        crops.append(prompt)
+        # Order follows the candidate sort: part-bearing (U3) first, then R7.
+        if len(crops) == 1:
+            return {"refDes": "U3", "value": None, "partNumber": "MMPQ3904"}
+        return {"refDes": "R7", "value": "5.1k", "partNumber": None}
+
+    filled = recover_component_identity(
+        graph, [(1, _blank_page_png())], understand=fake_understand
+    )
+    assert filled == {"values": 1, "partNumbers": 1}
+    by_id = {c["id"]: c for c in graph["components"]}
+    assert by_id["C1"]["value"] == "5.1k" and by_id["C1"]["valueSource"] == "vision-crop"
+    assert by_id["C2"]["partNumber"] == "MMPQ3904"
+    assert by_id["C2"]["partNumberSource"] == "vision-crop"
+    assert by_id["C3"]["value"] == "10k"  # untouched
+    assert len(crops) == 2  # R1 (valued) and R9 (no bbox) never cropped
+
+
+def test_recover_component_identity_rejects_implausible_transcriptions():
+    from docling_serve.extractors.component_identity import recover_component_identity
+
+    graph = {
+        "pages": [{"pageNumber": 1, "width": 612, "height": 792}],
+        "components": [
+            {"id": "C1", "refDes": "R7", "type": "resistor", "bbox": [100, 100, 120, 120]},
+        ],
+    }
+
+    def fake_understand(prompt, system, png):
+        # The crop echoes the refDes into the value field — must be rejected.
+        return {"refDes": "R7", "value": "R7", "partNumber": "10k"}
+
+    filled = recover_component_identity(
+        graph, [(1, _blank_page_png())], understand=fake_understand
+    )
+    assert filled == {"values": 0, "partNumbers": 0}
+    assert graph["components"][0].get("value") is None
+    # "10k" is a value, not a plausible part number, so it isn't adopted either.
+    assert graph["components"][0].get("partNumber") is None
+
+
+def test_reconcile_value_part_number_clears_stale_guess():
+    """An IC whose value names a different device than its verified part number
+    has the value moved to value_was; a real passive value is left alone."""
+    from docling_serve.extractors.component_identity import reconcile_value_part_number
+
+    graph = {
+        "components": [
+            {"id": "C1", "refDes": "U2", "type": "IC",
+             "value": "ULN2803A/TBD62783APG", "partNumber": "PIC16LF1719-I/PT-ND"},
+            {"id": "C2", "refDes": "R1", "type": "resistor",
+             "value": "10k", "partNumber": "RC0805-10K"},
+            {"id": "C3", "refDes": "U1", "type": "regulator",
+             "value": "LT1117-3.3", "partNumber": "LT1117-3.3"},  # same part: keep
+        ],
+    }
+    assert reconcile_value_part_number(graph) == 1
+    u2 = graph["components"][0]
+    assert u2["value"] is None
+    assert u2["value_was"] == "ULN2803A/TBD62783APG"
+    assert "reviewNote" in u2
+    # A genuine resistance value coexists with a part number untouched.
+    assert graph["components"][1]["value"] == "10k"
+    # value == partNumber is not a contradiction.
+    assert graph["components"][2]["value"] == "LT1117-3.3"
+
+
 def test_record_connectivity_quality_builds_qa_worklist():
     from docling_serve.extractors.connectivity_ids import record_connectivity_quality
 

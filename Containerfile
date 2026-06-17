@@ -72,7 +72,8 @@ ENV \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/app-root \
-    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models
+    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
+    HF_HOME=/opt/app-root/src/.cache/huggingface
 
 ARG UV_SYNC_EXTRA_ARGS
 
@@ -115,6 +116,20 @@ RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     umask 002 && uv sync --frozen --no-dev --all-extras ${UV_SYNC_EXTRA_ARGS}
 
 ENV LD_PRELOAD=/usr/local/lib/libmimalloc.so
+
+# === Air-gapped / IL5 lockdown ===========================================
+# Every model and the chunker tokenizer are baked into the image above. Force
+# the HuggingFace Hub, transformers, and datasets stacks fully offline so the
+# running container can NEVER attempt an outbound fetch. A missing artifact then
+# raises an immediate, explicit error instead of silently hanging on a
+# (firewall-blocked) network call. Do not unset these in IL5. To enable an
+# enrichment needing an extra model (code_formula, smolvlm, granite_vision,
+# granite_docling, ...), add it to MODELS_LIST at build time — never relax these.
+ENV \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+
 EXPOSE 5001
 
 CMD ["docling-serve", "run"]

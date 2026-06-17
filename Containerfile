@@ -99,9 +99,11 @@ RUN --security=insecure \
         mount --bind /tmp/fips_zero /proc/sys/crypto/fips_enabled; \
         HF_HUB_DOWNLOAD_TIMEOUT="90" \
         HF_HUB_ETAG_TIMEOUT="90" \
-        docling-tools models download -o "$DOCLING_SERVE_ARTIFACTS_PATH" $MODELS_LIST' && \
-    chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} && \
-    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH}
+        docling-tools models download -o "$DOCLING_SERVE_ARTIFACTS_PATH" $MODELS_LIST; \
+        HF_HOME=/opt/app-root/src/.cache/huggingface \
+        python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained(\"sentence-transformers/all-MiniLM-L6-v2\")"' && \
+    chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} /opt/app-root/src/.cache/huggingface && \
+    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH} /opt/app-root/src/.cache/huggingface
 USER 1001
 
 COPY --chown=1001:0 ./docling_serve ./docling_serve

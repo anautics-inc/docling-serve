@@ -411,6 +411,7 @@ def attach_hotspots(
         "figures": len(figures),
         "rendered": 0,
         "hotspots": 0,
+        "visionCalls": 0,
         "visionHotspots": 0,
         "linkedParts": 0,
     }
@@ -440,6 +441,7 @@ def attach_hotspots(
         under_budget = max_vision_calls == 0 or vision_calls < max_vision_calls
         if vision_ready and under_budget and missing and len(found) < min_recall * len(all_indices):
             vision_calls += 1
+            stats["visionCalls"] += 1
             vis = vision_callouts(
                 png,
                 missing,

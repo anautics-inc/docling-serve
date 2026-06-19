@@ -83,6 +83,17 @@ def extract_technical_order(
     metadata = parse_to_metadata(pages, filename=pdf_path.name)
     entries, figures = parse_parts_lists(pages)
 
+    # RPSTL fallback: the AF-MPL grammar doesn't read the Army/joint RPSTL column
+    # layout (ITEM | SMR | FSCM | PART NUMBER | DESCRIPTION | QTY). When the MPL
+    # pass finds nothing on an RPSTL-classified doc, parse the RPSTL grid instead.
+    if not entries and (triage.document_type == "TO-RPSTL" or triage.format_family == "rpstl"):
+        from docling_serve.technical_order.rpstl import parse_rpstl
+
+        rpstl_entries, rpstl_figures = parse_rpstl(pages)
+        if rpstl_entries:
+            entries, figures = rpstl_entries, rpstl_figures
+            notes.append(f"parsed as RPSTL ({len(entries)} rows)")
+
     # OCR fallback: a scanned / dirty-legacy-OCR TO whose text layer yielded no
     # parts list gets a fresh tesseract pass (this genuinely recovers rows on
     # older IPBs whose embedded OCR layer the column parser can't align). Two
@@ -134,7 +145,8 @@ def extract_technical_order(
             notes.append(
                 f"figure hotspots: {hs_stats['hotspots']} callouts on "
                 f"{hs_stats['rendered']} sheet(s) "
-                f"({hs_stats.get('visionHotspots', 0)} via vision), "
+                f"({hs_stats.get('visionHotspots', 0)} via vision in "
+                f"{hs_stats.get('visionCalls', 0)} call(s)), "
                 f"{hs_stats['linkedParts']} parts linked"
             )
         except Exception as err:  # pragma: no cover - rendering env dependent

@@ -11,6 +11,7 @@ as an additional, domain-specific pass.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,18 @@ from docling_serve.technical_order.rowbox import attach_row_boxes
 from docling_serve.technical_order.triage import triage_pdf
 
 _log = logging.getLogger(__name__)
+
+#: Parts-table header signals (used to locate parts pages for the vision reader
+#: even when the column parser can't align the page's dirty text).
+_PARTS_HEADER_RE = re.compile(
+    r"FIGURE\s*&|PART\s+NUMBER|\bSMR\b.{0,30}\bCODE\b|\bFSCM\b|\bCAGEC?\b",
+    re.I | re.S,
+)
+
+
+def _parts_header_pages(pages: list[str]) -> list[int]:
+    """1-based page numbers whose text carries a parts-list table header."""
+    return [i + 1 for i, text in enumerate(pages) if text and _PARTS_HEADER_RE.search(text)]
 
 TO_PROFILES = {
     "technical-order",
@@ -134,14 +147,25 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         and vcfg.get("base_url")
         and vcfg.get("api_key")
         and vcfg.get("model")
-        and triage.extraction_class == "scanned-no-text"
+        and triage.extraction_class != "born-digital"
     ):
         from docling_serve.technical_order.vision_parts import vision_parse_parts
 
         max_pages = int(vcfg.get("parts_max_pages", 40))
-        candidate_pages = sorted({e.page_number for e in entries if e.page_number}) or list(
-            range(1, min(triage.page_count, max_pages) + 1)
+        # Locate where the parts list starts: the first page the text/OCR pass
+        # placed a row on, or the first page whose (dirty) text shows a parts-table
+        # header. The IPB/RPSTL parts section is contiguous, so read a run FROM
+        # that page forward (a parts page often doesn't repeat the column header,
+        # so header-only detection misses the continuation). Bounded by the budget.
+        signal_pages = sorted(
+            {e.page_number for e in entries if e.page_number} | set(_parts_header_pages(pages))
         )
+        if signal_pages:
+            start = signal_pages[0]
+            run = set(range(start, min(triage.page_count, start + max_pages - 1) + 1))
+            candidate_pages = sorted(run | set(signal_pages))[:max_pages]
+        else:
+            candidate_pages = list(range(1, min(triage.page_count, max_pages) + 1))
         try:
             v_entries, v_stats = vision_parse_parts(
                 pdf_path,

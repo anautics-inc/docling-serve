@@ -354,7 +354,7 @@ def _fig_key(value: str) -> str:
     return (value or "").strip().upper()
 
 
-def attach_hotspots(
+def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeline
     pdf_path: Path,
     entries: list,
     figures: list,
@@ -416,20 +416,27 @@ def attach_hotspots(
         "linkedParts": 0,
     }
     for fig in figures:
-        fig_key = _fig_key(fig.figure_number)
-        index_to_part = by_fig.get(fig_key, {})
-        if not index_to_part:
-            lead = fig_key.split("-")[0]
-            if lead in by_fig and lead_counts.get(lead, 0) == 1:
-                index_to_part = by_fig[lead]
-        if not index_to_part or not fig.page_number:
+        if not fig.page_number:
             continue
+        # Always capture the figure/drawing IMAGE — every illustration in the
+        # document, not just parts figures (block diagrams, schematics, etc.).
         stem_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"figure-{fig.figure_number}-{fig.sheet_number or '1'}")
         png = render_figure_png(pdf_path, fig.page_number, media_dir / stem_name)
         if png is None:
             continue
         stats["rendered"] += 1
         fig.media_key = f"media/{png.name}"
+
+        # Callout hotspots only when the figure joins to parts (an IPB exploded
+        # view). Non-parts diagrams are still captured as images above.
+        fig_key = _fig_key(fig.figure_number)
+        index_to_part = by_fig.get(fig_key, {})
+        if not index_to_part:
+            lead = fig_key.split("-")[0]
+            if lead in by_fig and lead_counts.get(lead, 0) == 1:
+                index_to_part = by_fig[lead]
+        if not index_to_part:
+            continue
 
         all_indices = set(index_to_part.keys())
         hotspots = detect_figure_hotspots(png, all_indices)

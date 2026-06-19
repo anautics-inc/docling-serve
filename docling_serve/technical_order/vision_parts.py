@@ -37,8 +37,14 @@ _PROMPT = (
     "or RPSTL parts list. Read the PARTS-LIST TABLE on the page and return every "
     "data row, in printed order.\n"
     "Each row has some of these columns (omit what isn't present):\n"
-    "- index: the FIGURE & INDEX or ITEM number (e.g. '1', '5A', '14')\n"
-    "- smr: the Source/Maintenance/Recoverability code (e.g. PAOZZ)\n"
+    "- figure: the FIGURE number the row belongs to. The 'Figure & Index Number' "
+    "column prints it as 'FIG-INDEX' (e.g. '7-1-10' => figure '7-1'). When a row "
+    "shows only an index (the figure repeats from the rows above), STILL set figure "
+    "to that same figure number.\n"
+    "- index: the item index within the figure (e.g. '10', '5A' — the part AFTER "
+    "the figure prefix; for '7-1-10' the index is '10')\n"
+    "- smr: the Source/Maintenance/Recoverability code in the rightmost SMR column "
+    "(e.g. PAOZZ, MFFFF, XC); blank if the row inherits the page default\n"
     "- cage: the 5-char CAGE/FSCM code (e.g. 96906, 0W357)\n"
     "- partNumber: the manufacturer part number\n"
     "- nsn: National Stock Number, formatted ####-##-###-#### if present\n"
@@ -46,7 +52,7 @@ _PROMPT = (
     "- qty: units per assembly\n"
     "- indenture: integer indenture level (number of leading dots), else 0\n"
     "Return STRICT JSON only:\n"
-    '{"parts":[{"index":"","smr":"","cage":"","partNumber":"","nsn":"","description":"","qty":"","indenture":0}]}\n'
+    '{"parts":[{"figure":"","index":"","smr":"","cage":"","partNumber":"","nsn":"","description":"","qty":"","indenture":0}]}\n'
     "Transcribe exactly what is printed; never invent part numbers or NSNs. Skip "
     "page headers, footers, figure captions, and prose. If the page has no parts "
     'table, return {"parts":[]}.'
@@ -98,7 +104,9 @@ def _vision_rows(png_path: Path, *, base_url: str, api_key: str, model: str, tim
     return rows if isinstance(rows, list) else []
 
 
-def _to_entry(row: dict, *, sequence: int, page_number: int) -> PartsListEntry | None:
+def _to_entry(
+    row: dict, *, sequence: int, page_number: int, figure: str = ""
+) -> PartsListEntry | None:
     """Build a PartsListEntry from a model row; drop rows with no part identity."""
     if not isinstance(row, dict):
         return None
@@ -124,6 +132,7 @@ def _to_entry(row: dict, *, sequence: int, page_number: int) -> PartsListEntry |
     return PartsListEntry(
         sequence=sequence,
         page_number=page_number,
+        figure_number_raw=figure,
         figure_index_raw=index,
         part_number_raw=part,
         cage_raw=s("cage"),
@@ -165,13 +174,30 @@ def vision_parse_parts(
     entries: list[PartsListEntry] = []
     seq = 0
     calls = 0
+    current_figure = ""
     for page in pages:
         png = render_figure_png(pdf_path, page, tmp / f"page-{page}", dpi=dpi)
         if png is None:
             continue
         calls += 1
         for row in _vision_rows(png, base_url=base_url, api_key=api_key, model=model):
-            entry = _to_entry(row, sequence=seq, page_number=page)
+            if not isinstance(row, dict):
+                continue
+            # The 'Figure & Index Number' column prints 'FIG-INDEX' (e.g. 7-1-10)
+            # only on a figure's first row; later rows show the bare index. Split
+            # deterministically (last dash => figure | index) since the model is
+            # inconsistent about it, and carry the figure forward to bare rows.
+            fig = str(row.get("figure") or "").strip().strip("-. ")
+            raw_index = str(row.get("index") or "").strip().strip("-. ")
+            if "-" in raw_index:
+                head, _, tail = raw_index.rpartition("-")
+                if head:
+                    fig = fig or head
+                    raw_index = tail
+            if fig:
+                current_figure = fig
+            row["index"] = raw_index
+            entry = _to_entry(row, sequence=seq, page_number=page, figure=current_figure)
             if entry is not None:
                 entries.append(entry)
                 seq += 1

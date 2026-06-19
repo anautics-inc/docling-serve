@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://captify.io/schemas/schematic-graph.schema.json",
+  "title": "Captify Schematic Graph",
+  "description": "Tool-agnostic, model-derived structural representation of an engineering schematic or drawing. Components and nets are produced by a vision model reading the rendered drawing, not by hard-coded symbol rules. Pairs with an exported SVG (geometry), a KiCad schematic (.kicad_sch, geometry replay), and a KiCad-style netlist (.net) for re-opening in EDA tools.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schemaVersion", "artifactKind", "components", "nets"],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "artifactKind": { "const": "captify.schematic.v1" },
+    "source": { "type": "object", "additionalProperties": true },
+    "model": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "provider": { "type": "string" },
+        "modelId": { "type": "string" },
+        "understood": { "type": "boolean" }
+      }
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "pageNumber": { "type": "integer" },
+          "svg": { "type": ["string", "null"] },
+          "raster": { "type": ["string", "null"] },
+          "titleBlock": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "refDes": { "type": ["string", "null"] },
+          "type": { "type": ["string", "null"] },
+          "value": { "type": ["string", "null"] },
+          "valueSource": {
+            "type": ["string", "null"],
+            "description": "Provenance of value: 'vision-crop' when recovered from a per-component crop, otherwise the whole-page model pass."
+          },
+          "value_was": {
+            "type": ["string", "null"],
+            "description": "Prior value cleared during reconciliation (it named a different part than partNumber); kept for audit."
+          },
+          "reviewNote": { "type": ["string", "null"] },
+          "partNumber": { "type": ["string", "null"] },
+          "partNumberSource": { "type": ["string", "null"] },
+          "location": { "type": ["string", "null"] },
+          "parentComponent": { "type": ["string", "null"] },
+          "description": { "type": ["string", "null"] },
+          "confidence": { "type": ["number", "null"] },
+          "page": { "type": ["integer", "null"] },
+          "pins": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "id": { "type": "string" },
+                "number": { "type": ["string", "null"] },
+                "name": { "type": ["string", "null"] },
+                "status": { "type": ["string", "null"] },
+                "net": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    },
+    "nets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "nodes"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": ["string", "null"] },
+          "class": { "type": ["string", "null"] },
+          "wireId": { "type": ["string", "null"] },
+          "gauge": { "type": ["string", "null"] },
+          "signalType": { "type": ["string", "null"] },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["component", "pin"],
+              "properties": {
+                "component": { "type": "string" },
+                "pin": { "type": ["string", "null"] },
+                "pinSource": { "type": ["string", "null"] },
+                "attachment": {
+                  "type": ["array", "null"],
+                  "items": { "type": "number" },
+                  "description": "Page-pt point where the net's wire meets the component box."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "groundPoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": ["string", "null"] },
+          "location": { "type": ["string", "null"] },
+          "page": { "type": ["integer", "null"] }
+        }
+      }
+    },
+    "confidence": { "type": ["number", "null"] },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

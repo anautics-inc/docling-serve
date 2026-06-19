@@ -6,3 +6,7 @@ leptonica-devel
 libglvnd-glx
 glib2
 libatomic
+openssl-fips-provider
+mdbtools
+poppler-utils
+ngspice

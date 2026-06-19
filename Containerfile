@@ -71,7 +71,8 @@ ENV \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/app-root \
-    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models
+    DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
+    HF_HOME=/opt/app-root/src/.cache/huggingface
 
 ARG UV_SYNC_EXTRA_ARGS
 
@@ -84,14 +85,39 @@ RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-extra flash-attn && \
     FLASH_ATTENTION_SKIP_CUDA_BUILD=TRUE uv sync ${UV_SYNC_ARGS} ${UV_SYNC_EXTRA_ARGS} --no-build-isolation-package=flash-attn
 
-ARG MODELS_LIST="layout tableformer picture_classifier rapidocr easyocr"
+# Baked models cover the full native enrichment set used for max extraction:
+# layout + tableformer (tables), picture_classifier (image classification),
+# code_formula (code + formula enrichment), and the OCR engines. Picture
+# *description* (captions) uses the remote LiteLLM/Bedrock API, not a local VLM,
+# so no captioning model is baked. Add more here if new enrichments are enabled.
+ARG MODELS_LIST="layout tableformer picture_classifier code_formula rapidocr easyocr"
+# The HybridChunker tokenizer is not a docling model (docling-tools can't fetch
+# it) and is otherwise pulled from HuggingFace lazily on first chunk request —
+# forbidden in an air-gapped / IL5 runtime. Bake it into the image here.
+ARG CHUNK_TOKENIZER_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 
-RUN echo "Downloading models..." && \
-    HF_HUB_DOWNLOAD_TIMEOUT="90" \
-    HF_HUB_ETAG_TIMEOUT="90" \
-    docling-tools models download -o "${DOCLING_SERVE_ARTIFACTS_PATH}" ${MODELS_LIST} && \
-    chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} && \
-    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH}
+# Only build-time stage allowed to reach HuggingFace: pull every docling model
+# AND pre-cache the chunker tokenizer into HF_HOME. After this the image is
+# sealed offline (see ENV below).
+#
+# Mount-bind a file containing "0" over /proc/sys/crypto/fips_enabled so that
+# PyTorch's bundled OpenSSL sees FIPS as disabled and skips its self-test on a
+# FIPS-enabled build runner. --security=insecure grants CAP_SYS_ADMIN and must
+# run as root for mount(2) to succeed (build with BuildKit insecure entitlement).
+USER 0
+RUN --security=insecure \
+    bash -c 'set -e; \
+        printf "0\n" > /tmp/fips_zero; \
+        mount --bind /tmp/fips_zero /proc/sys/crypto/fips_enabled; \
+        echo "Downloading docling models..."; \
+        HF_HUB_DOWNLOAD_TIMEOUT="90" HF_HUB_ETAG_TIMEOUT="90" \
+        docling-tools models download -o "$DOCLING_SERVE_ARTIFACTS_PATH" $MODELS_LIST; \
+        echo "Pre-caching chunker tokenizer ($CHUNK_TOKENIZER_MODEL)..."; \
+        HF_HUB_DOWNLOAD_TIMEOUT="90" HF_HUB_ETAG_TIMEOUT="90" \
+        python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained(\"$CHUNK_TOKENIZER_MODEL\")"' && \
+    chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} ${HF_HOME} && \
+    chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH} ${HF_HOME}
+USER 1001
 
 COPY --chown=1001:0 ./docling_serve ./docling_serve
 
@@ -102,6 +128,18 @@ RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     umask 002 && uv sync --frozen --no-dev --all-extras ${UV_SYNC_EXTRA_ARGS}
 
 ENV LD_PRELOAD=/usr/local/lib/libmimalloc.so
+
+# === Air-gapped / IL5 lockdown ===========================================
+# All models + the chunker tokenizer are baked above. Force the HuggingFace /
+# transformers / datasets stacks fully offline so the running container can
+# never attempt an outbound fetch; a missing artifact fails fast instead of
+# hanging on a firewall-blocked call. To enable an enrichment needing an extra
+# model, add it to MODELS_LIST at build time — never relax these flags.
+ENV \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_DATASETS_OFFLINE=1
+
 EXPOSE 5001
 
 CMD ["docling-serve", "run"]

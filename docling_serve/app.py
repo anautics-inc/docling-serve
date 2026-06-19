@@ -1006,6 +1006,271 @@ def create_app():  # noqa: C901
             failure=task.failure,
         )
 
+    # Knowledge-graph extraction (NER replacement) over already-converted text.
+    # Conversion is docling's OOTB job; this only runs docling-graph on the text
+    # the caller already produced. Body: {text, template?, profile?}. Returns
+    # {nodes, edges, labels, edgeLabels, nodeCount, edgeCount, ...}; an empty graph
+    # plus a `note` when graph extraction is unconfigured/unavailable, so callers
+    # (pytology) degrade uniformly instead of erroring.
+    @app.post("/v1/graph/extract", tags=["graph"])
+    async def extract_graph(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: dict,
+    ):
+        from docling_serve.graph import GraphExtractionUnavailable, graph_payload_from_text
+        from docling_serve.graph.templates import resolve_profile_template
+
+        text = str(body.get("text") or "")
+        template = body.get("template")
+        if not template:
+            template = resolve_profile_template(str(body.get("profile") or "") or None)
+        try:
+            return graph_payload_from_text(
+                text, template=template if isinstance(template, str) else None
+            )
+        except GraphExtractionUnavailable as err:
+            return {
+                "nodes": [],
+                "edges": [],
+                "labels": {},
+                "edgeLabels": {},
+                "nodeCount": 0,
+                "edgeCount": 0,
+                "note": str(err),
+            }
+
+    # Microsoft Access (.mdb/.accdb) — docling has no Access backend, so this gap is
+    # filled by converting the database to docling-native markdown tables (mdbtools),
+    # which chunking + graph extraction then consume out of the box.
+    @app.post("/v1/extract/access", tags=["extract"])
+    async def extract_access(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        files: list[UploadFile],
+    ):
+        import tempfile
+        from pathlib import Path as _Path
+
+        from docling_serve.access import (
+            AccessToolsUnavailableError,
+            access_to_markdown,
+            is_access_file,
+        )
+        from docling_serve.access.extract import dump_schema
+
+        if not files:
+            raise HTTPException(status_code=422, detail="No file uploaded.")
+        upload = files[0]
+        name = upload.filename or "database.mdb"
+        if not is_access_file(name):
+            raise HTTPException(
+                status_code=422, detail="extract/access expects a .mdb or .accdb file."
+            )
+        data = await upload.read()
+        tmp_path: _Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                suffix=_Path(name).suffix.lower(), delete=False
+            ) as handle:
+                handle.write(data)
+                tmp_path = _Path(handle.name)
+            markdown, tables = access_to_markdown(tmp_path)
+            schema = dump_schema(tmp_path)
+        except AccessToolsUnavailableError as err:
+            raise HTTPException(status_code=503, detail=str(err)) from err
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+        return {"filename": name, "markdown": markdown, "tables": tables, "schema": schema}
+
+    # Technical Order (IPB/RPSTL) — the master parts list is a layout-aligned table
+    # docling's reading-order export doesn't preserve, so this runs the deterministic
+    # poppler-layout + MPL parser as an added pass and returns the captify.bom.v1 payload.
+    @app.post("/v1/extract/technical-order", tags=["extract"])
+    async def extract_technical_order_route(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        files: list[UploadFile],
+    ):
+        import tempfile
+        from pathlib import Path as _Path
+
+        from docling_serve.technical_order.extract import extract_technical_order
+
+        if not files:
+            raise HTTPException(status_code=422, detail="No file uploaded.")
+        upload = files[0]
+        name = upload.filename or "to.pdf"
+        if not name.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=422, detail="extract/technical-order expects a .pdf file."
+            )
+        data = await upload.read()
+        tmp_path: _Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
+                handle.write(data)
+                tmp_path = _Path(handle.name)
+            return extract_technical_order(tmp_path, source_key=name)
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    # Schematic (engineering drawing) extraction — the wiring GEOMETRY docling can't
+    # recover (component symbols + the nets connecting their pins) is produced here as
+    # a captify.schematic.v1 graph + derived artifacts (SVG, KiCad, netlist, EDML, XML).
+    @app.post("/v1/extract/schematic", tags=["extract"])
+    async def extract_schematic_route(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        files: list[UploadFile],
+        profile: Annotated[str, Form()] = "schematic",
+        prefix: Annotated[str, Form()] = "",
+        bucket: Annotated[str, Form()] = "",
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+    ):
+        import shutil as _shutil
+        import tempfile
+        from pathlib import Path as _Path
+
+        from docling_serve.schematic.extract import extract_schematic, publish_dir_to_s3
+
+        if not files:
+            raise HTTPException(status_code=422, detail="No file uploaded.")
+        upload = files[0]
+        name = upload.filename or "schematic.pdf"
+        data = await upload.read()
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        work = _Path(tempfile.mkdtemp(prefix="schematic-"))
+        try:
+            src = work / name
+            src.write_bytes(data)
+            result = extract_schematic(
+                src, work / "bundle", profile=profile, tenant_id=tenant_id, source_key=name
+            )
+            published: list[str] = []
+            target_bucket = (
+                bucket or docling_serve_settings.artifact_storage_bucket or ""
+            ).strip()
+            if prefix and target_bucket:
+                published = publish_dir_to_s3(
+                    work / "bundle", bucket=target_bucket, prefix=prefix
+                )
+            return {
+                "domain": result["domain"],
+                "graph": result["graph"],
+                "artifacts": result["artifacts"],
+                "s3Keys": published,
+                "bucket": target_bucket if published else None,
+                "prefix": prefix if published else None,
+                "notes": result["notes"],
+            }
+        finally:
+            _shutil.rmtree(work, ignore_errors=True)
+
+    def _schematic_bucket(body: dict) -> str:
+        return (
+            str(body.get("bucket") or "") or docling_serve_settings.artifact_storage_bucket or ""
+        ).strip()
+
+    # CAD-style delivery check for a published schematic bundle (graph integrity,
+    # KiCad open/ERC, netlist, KBL XSD, XML, ngspice). Body: {prefix, bucket?}.
+    @app.post("/v1/schematic/check", tags=["schematic"])
+    async def schematic_check(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: dict,
+    ):
+        from docling_serve.schematic.schematic_revision import check_schematic_bundle
+
+        prefix = str(body.get("prefix") or "").strip()
+        bucket = _schematic_bucket(body)
+        if not (prefix and bucket):
+            raise HTTPException(
+                status_code=422,
+                detail="prefix and a bucket (or configured artifact storage) are required.",
+            )
+        try:
+            checks = check_schematic_bundle(bucket, prefix)
+        except (FileNotFoundError, ValueError) as err:
+            raise HTTPException(status_code=404, detail=str(err)) from err
+        return {
+            "checks": [c.as_dict() for c in checks],
+            "passed": all(c.status != "fail" for c in checks),
+        }
+
+    # Apply browser edits to a schematic bundle and regenerate every derived artifact,
+    # republish, and return the post-edit delivery check. Body: {prefix, bucket?, edits}.
+    @app.post("/v1/schematic/revise", tags=["schematic"])
+    async def schematic_revise(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: dict,
+    ):
+        from docling_serve.schematic.schematic_revision import revise_schematic_bundle
+
+        prefix = str(body.get("prefix") or "").strip()
+        bucket = _schematic_bucket(body)
+        edits = body.get("edits")
+        if not (prefix and bucket and isinstance(edits, dict)):
+            raise HTTPException(
+                status_code=422, detail="prefix, a bucket, and an edits object are required."
+            )
+        try:
+            outcome = revise_schematic_bundle(bucket, prefix, edits)
+        except (FileNotFoundError, ValueError) as err:
+            raise HTTPException(status_code=404, detail=str(err)) from err
+        return {
+            "checks": [c.as_dict() for c in outcome.checks],
+            "passed": all(c.status != "fail" for c in outcome.checks),
+            "applied": outcome.applied,
+            "notes": outcome.notes,
+        }
+
+    # DC operating-point simulation of a published schematic (real ngspice solve).
+    # Body: {prefix, bucket?, sources?:[{net, volts}]}.
+    @app.post("/v1/schematic/simulate", tags=["schematic"])
+    async def schematic_simulate(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: dict,
+    ):
+        import dataclasses
+        import json as _json
+
+        import boto3
+
+        from docling_serve.schematic.spice_simulation import simulate_graph
+
+        prefix = str(body.get("prefix") or "").strip().strip("/")
+        bucket = _schematic_bucket(body)
+        if not (prefix and bucket):
+            raise HTTPException(status_code=422, detail="prefix and a bucket are required.")
+        client = boto3.client("s3")
+        try:
+            graph = _json.loads(
+                client.get_object(
+                    Bucket=bucket, Key=f"{prefix}/schematic/schematic-graph.json"
+                )["Body"].read()
+            )
+        except Exception as err:
+            raise HTTPException(
+                status_code=404, detail=f"schematic graph not found: {err}"
+            ) from err
+        sources = body.get("sources") if isinstance(body.get("sources"), list) else []
+        source = graph.get("source") or {}
+        result = simulate_graph(
+            graph,
+            source_name=str(source.get("originalFileName") or "schematic.pdf"),
+            sources=sources,
+        )
+        return {
+            "ok": result.ok,
+            "classification": dataclasses.asdict(result.classification),
+            "supplies": result.supplies,
+            "grounds": result.grounds,
+            "nodeVoltages": result.nodeVoltages,
+            "sourceCurrents": result.sourceCurrents,
+            "warnings": result.warnings,
+            "engine": result.engine,
+        }
+
     # Convert a document from file(s) using the async api
     @app.post(
         "/v1/convert/file/async",

@@ -34,8 +34,20 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "docling-slim[standard,service-client,remote-serving]>=2.101.2,<3.0.0",
-    "docling-core>=2.79.0",
+    # chunking-openai brings the OpenAI/tiktoken tokenizer docling-graph imports.
+    "docling-core[chunking,chunking-openai]>=2.79.0",
     "docling-jobkit[rq,ray,vlm]>=1.23.1,<2.0.0",
+    # Knowledge-graph extraction (NER replacement) backing POST /v1/graph/extract.
+    # docling-graph declares a dependency on the FULL `docling` distribution, but it only
+    # needs the `docling` import namespace (which docling-slim provides) + docling-core
+    # chunking. We exclude full `docling` via a uv override below so it cannot conflict with
+    # the `docling-slim` that docling-jobkit requires (both own the `docling/` package).
+    "docling-graph>=1.5.1,<2.0.0",
+    # Schematic extraction: PDF/Office parsing + skeleton-based wire vectorization (cv2
+    # arrives via the OCR stack) and the secure XML parser KiCad export uses.
+    "python-pptx>=1.0.0,<2.0.0",
+    "scikit-image>=0.24",
+    "defusedxml>=0.7.1,<0.8.0",
     "fastapi[standard]<0.137.0",
     "httpx~=0.28",
     "pydantic~=2.10",
@@ -160,6 +172,11 @@ override-dependencies = [
   "xgrammar>=0.1.24",
   "grpcio>=1.75.1",
   "cryptography>=46.0.7",
+  # Exclude the FULL `docling` distribution everywhere (always-false marker). docling-jobkit
+  # requires `docling-slim`, which owns the `docling/` namespace; docling-graph's declared
+  # `docling` dependency would otherwise pull the full dist and conflict. The `docling`
+  # namespace docling-graph imports is satisfied by docling-slim.
+  "docling ; python_version < '0'",
 ]
 
 [tool.uv.sources]

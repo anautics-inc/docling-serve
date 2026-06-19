@@ -145,6 +145,42 @@ class DoclingServeSettings(BaseSettings):
 
     api_key: str = ""
 
+    # === LiteLLM proxy (shared LLM transport) ===
+    # Knowledge-graph extraction routes its model calls through the LiteLLM proxy,
+    # which fronts Bedrock and owns credentials/guardrails/spend. When unset, graph
+    # extraction is skipped and /v1/graph/extract returns an empty graph + note.
+    litellm_base_url: str | None = None
+    litellm_api_key: str | None = None
+
+    # === Model-driven extraction (Bedrock via LiteLLM) ===
+    # The schematic extractor (and other model-driven passes) may call a multimodal
+    # model to *understand* a drawing rather than relying only on vector heuristics.
+    # The model name is a LiteLLM proxy alias. Disabled by default -> geometry-only.
+    bedrock_enabled: bool = False
+    bedrock_vision_model: str = "bedrock-claude-sonnet-4-5"
+    bedrock_max_tokens: int = 8192
+    bedrock_temperature: float = 0.0
+    bedrock_timeout_seconds: float = 120.0
+    bedrock_max_retries: int = 3
+    bedrock_max_pages: int = 8
+    bedrock_render_dpi: int = 200
+
+    # === Knowledge-graph extraction (docling-graph via LiteLLM) ===
+    # /v1/graph/extract runs docling-graph's template-driven entity+relation
+    # extraction (the AWS Comprehend NER replacement) over already-converted text.
+    # graph_litellm_* are optional per-path overrides of the shared litellm_* above.
+    graph_litellm_base_url: str | None = None
+    graph_litellm_api_key: str | None = None
+    graph_litellm_model: str = "bedrock-claude-sonnet-4-6"
+    graph_litellm_provider: str = "litellm_proxy"
+    # Dotted import path to a Pydantic template class. None -> built-in generic template.
+    graph_extraction_template: str | None = None
+    graph_extraction_contract: str = "direct"
+    graph_extraction_structured_output: bool = False
+    graph_extraction_max_chars: int = 200_000
+    graph_extraction_max_output_tokens: int = 32_000
+    graph_extraction_context_limit: int = 200_000
+
     max_document_timeout: float = 3_600 * 24 * 7  # 7 days
     max_num_pages: int = sys.maxsize
     max_file_size: int = sys.maxsize

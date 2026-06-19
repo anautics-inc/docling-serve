@@ -52,7 +52,7 @@ def looks_like_technical_order(pdf_path: Path) -> bool:
     return triage.document_type in _TO_DOCUMENT_TYPES or triage.format_family in _MPL_FAMILIES
 
 
-def extract_technical_order(
+def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; clearer inline
     pdf_path: Path,
     *,
     source_key: str = "",
@@ -122,6 +122,44 @@ def extract_technical_order(
                 metadata = parse_to_metadata(ocr_pages, filename=pdf_path.name)
                 notes.append(f"text source: tesseract OCR ({len(entries)} rows)")
                 text_layer_source = False
+
+    # Vision parts-TABLE reader for genuinely SCANNED docs: the text-OCR column
+    # parse above garbles scanned parts pages (scrambled part numbers, lost
+    # figure/index), so re-read the table off the rendered page with the vision
+    # model and replace those rows. Gated to scanned-no-text docs + bounded by a
+    # page budget; the candidate pages are where the text pass placed rows.
+    vcfg = vision or {}
+    if (
+        vcfg.get("parts_enabled")
+        and vcfg.get("base_url")
+        and vcfg.get("api_key")
+        and vcfg.get("model")
+        and triage.extraction_class == "scanned-no-text"
+    ):
+        from docling_serve.technical_order.vision_parts import vision_parse_parts
+
+        max_pages = int(vcfg.get("parts_max_pages", 40))
+        candidate_pages = sorted({e.page_number for e in entries if e.page_number}) or list(
+            range(1, min(triage.page_count, max_pages) + 1)
+        )
+        try:
+            v_entries, v_stats = vision_parse_parts(
+                pdf_path,
+                candidate_pages,
+                base_url=vcfg["base_url"],
+                api_key=vcfg["api_key"],
+                model=vcfg["model"],
+                max_pages=max_pages,
+            )
+        except Exception as err:
+            warnings.append(f"vision parts reader failed: {err}")
+        else:
+            if v_entries:
+                entries = v_entries
+                text_layer_source = False
+                notes.append(
+                    f"vision parts reader: {len(v_entries)} rows from {v_stats['calls']} page(s)"
+                )
 
     # Row boxes for in-page highlighting (text-layer coordinates only).
     if entries and text_layer_source:

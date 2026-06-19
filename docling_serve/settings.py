@@ -172,6 +172,11 @@ class DoclingServeSettings(BaseSettings):
     # Hard cap on vision callout passes per document (bounds Bedrock spend/latency
     # on figure-dense parts manuals). 0 disables the cap.
     figure_hotspot_vision_max_calls: int = 40
+    # Vision parts-TABLE reader for genuinely SCANNED docs: the text-OCR column
+    # parser garbles scanned parts pages, so read the table off the rendered page
+    # with the vision model instead. Bounded by a per-document page budget.
+    vision_parts: bool = True
+    vision_parts_max_pages: int = 40
 
     # === Knowledge-graph extraction (docling-graph via LiteLLM) ===
     # /v1/graph/extract runs docling-graph's template-driven entity+relation

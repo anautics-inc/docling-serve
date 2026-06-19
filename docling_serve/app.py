@@ -1137,6 +1137,8 @@ def create_app():  # noqa: C901
                     "model": docling_serve_settings.bedrock_vision_model,
                     "min_recall": docling_serve_settings.figure_hotspot_vision_min_recall,
                     "max_calls": docling_serve_settings.figure_hotspot_vision_max_calls,
+                    "parts_enabled": docling_serve_settings.vision_parts,
+                    "parts_max_pages": docling_serve_settings.vision_parts_max_pages,
                 }
             payload = extract_technical_order(
                 src, source_key=name, media_dir=media_dir, vision=vision_cfg

@@ -164,6 +164,14 @@ class DoclingServeSettings(BaseSettings):
     bedrock_max_retries: int = 3
     bedrock_max_pages: int = 8
     bedrock_render_dpi: int = 200
+    # Figure callout hotspots: when a figure's tesseract callout recall falls
+    # below this fraction, a Sonnet-4.5 (LiteLLM/Bedrock) vision pass fills the
+    # missing callouts. Set the enable flag off to stay pure-OCR (no model).
+    figure_hotspot_vision: bool = True
+    figure_hotspot_vision_min_recall: float = 0.75
+    # Hard cap on vision callout passes per document (bounds Bedrock spend/latency
+    # on figure-dense parts manuals). 0 disables the cap.
+    figure_hotspot_vision_max_calls: int = 40
 
     # === Knowledge-graph extraction (docling-graph via LiteLLM) ===
     # /v1/graph/extract runs docling-graph's template-driven entity+relation

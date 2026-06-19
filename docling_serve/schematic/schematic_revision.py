@@ -302,25 +302,28 @@ def check_xml(xml_path: Path) -> CheckResult:
 
 
 def check_spice(spice_path: Path) -> CheckResult:
-    if not shutil.which("ngspice"):
-        return CheckResult("spice", "SPICE simulation netlist", "skip", "ngspice not installed")
-    checked = spice_path.read_text().replace(
-        ".end\n", ".control\nlisting e\nquit\n.endc\n.end\n"
-    )
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as handle:
-        handle.write(checked)
-        temp_path = handle.name
+    """Elaborate the SPICE deck through libngspice (PySpice) — no CLI."""
     try:
-        result = subprocess.run(
-            ["ngspice", "-b", temp_path], capture_output=True, text=True, timeout=120
+        from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+    except Exception:
+        return CheckResult(
+            "spice", "SPICE simulation netlist", "skip", "PySpice/libngspice not available"
         )
-    finally:
-        Path(temp_path).unlink(missing_ok=True)
-    combined = (result.stdout + result.stderr).lower()
-    if result.returncode != 0 or "error" in combined.replace("no error", ""):
-        first = next((line for line in combined.splitlines() if "error" in line), "unknown")
-        return CheckResult("spice", "SPICE simulation netlist", "fail", first[:200])
-    return CheckResult("spice", "SPICE simulation netlist", "pass", "ngspice elaborated it")
+    deck = spice_path.read_text()
+    # Give the engine an analysis card so it actually elaborates the deck.
+    if ".op" not in deck.lower() and ".control" not in deck.lower():
+        deck = (
+            deck.replace(".end\n", ".op\n.end\n")
+            if ".end\n" in deck
+            else deck + "\n.op\n.end\n"
+        )
+    try:
+        ngspice = NgSpiceShared.new_instance()
+        ngspice.load_circuit(deck)
+        ngspice.run()
+    except Exception as error:
+        return CheckResult("spice", "SPICE simulation netlist", "fail", str(error)[:200])
+    return CheckResult("spice", "SPICE simulation netlist", "pass", "libngspice elaborated it")
 
 
 def run_delivery_checks(graph: dict[str, Any], schematic_dir: Path) -> list[CheckResult]:

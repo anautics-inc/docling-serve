@@ -6,6 +6,12 @@ ARG UV_SYNC_EXTRA_ARGS=""
 
 ARG MIMALLOC_VERSION=v3.2.8
 
+# ngspice built as a shared library (libngspice) for PySpice's in-process binding,
+# which backs schematic SPICE simulation. ngspice is not packaged for EL9, so it is
+# compiled from the upstream release here (like mimalloc) and the .so copied into
+# the final image — no ngspice CLI, no EPEL.
+ARG NGSPICE_VERSION=44
+
 
 ###################################################################################################
 # Build mimalloc                                                                                  #
@@ -29,6 +35,36 @@ WORKDIR /opt/app-root/src/mimalloc/out/release
 RUN cmake ../.. && make
 
 
+###################################################################################################
+# Build libngspice (shared) for PySpice                                                          #
+###################################################################################################
+
+FROM ${BASE_IMAGE} AS ngspice
+
+ARG NGSPICE_VERSION
+
+USER 0
+
+RUN dnf install -y --best --nodocs --setopt=install_weak_deps=False \
+    gcc make bison flex tar gzip autoconf automake libtool
+
+# The GitHub source archive is a raw git tree (no generated ./configure), so the
+# build bootstraps autotools via ./autogen.sh first.
+ADD https://github.com/imr/ngspice/archive/refs/tags/ngspice-${NGSPICE_VERSION}.tar.gz /tmp/ngspice.tar.gz
+
+RUN mkdir -p /tmp/ngspice-src && \
+    tar -xzf /tmp/ngspice.tar.gz -C /tmp/ngspice-src --strip-components=1
+
+WORKDIR /tmp/ngspice-src
+# --with-ngshared builds libngspice.so (the cffi target PySpice loads); no CLI,
+# no X11/GUI. Installs into /usr/local/lib.
+RUN ./autogen.sh && \
+    ./configure --with-ngshared --disable-debug --without-x \
+        --prefix=/usr/local CFLAGS="-O2" && \
+    make -j"$(nproc)" && \
+    make install
+
+
 FROM ${BASE_IMAGE} AS docling-base
 
 ###################################################################################################
@@ -47,6 +83,12 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     rm -rf /var/cache/dnf
 
 COPY --from=mimalloc /opt/app-root/src/mimalloc/out/release/libmimalloc.so /usr/local/lib/libmimalloc.so
+
+# libngspice (+ its versioned symlinks) for PySpice's NgSpiceShared binding.
+# Register /usr/local/lib so the dynamic loader (and ctypes find_library) resolve it.
+COPY --from=ngspice /usr/local/lib/libngspice.so* /usr/local/lib/
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-lib.conf && ldconfig
+
 RUN /usr/bin/fix-permissions /opt/app-root/src/.cache
 
 ENV TESSDATA_PREFIX=/usr/share/tesseract/tessdata/
@@ -93,7 +135,10 @@ RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
 ARG MODELS_LIST="layout tableformer picture_classifier code_formula rapidocr easyocr"
 # The HybridChunker tokenizer is not a docling model (docling-tools can't fetch
 # it) and is otherwise pulled from HuggingFace lazily on first chunk request —
-# forbidden in an air-gapped / IL5 runtime. Bake it into the image here.
+# forbidden in an air-gapped / IL5 runtime. Bake the FULL model repo here (not
+# just AutoTokenizer): the chunker reads sentence_bert_config.json to determine
+# max_tokens, which AutoTokenizer.from_pretrained does NOT cache — so an offline
+# runtime fails chunking with "max_tokens could not be determined" without it.
 ARG CHUNK_TOKENIZER_MODEL="sentence-transformers/all-MiniLM-L6-v2"
 
 # Only build-time stage allowed to reach HuggingFace: pull every docling model
@@ -112,9 +157,9 @@ RUN --security=insecure \
         echo "Downloading docling models..."; \
         HF_HUB_DOWNLOAD_TIMEOUT="90" HF_HUB_ETAG_TIMEOUT="90" \
         docling-tools models download -o "$DOCLING_SERVE_ARTIFACTS_PATH" $MODELS_LIST; \
-        echo "Pre-caching chunker tokenizer ($CHUNK_TOKENIZER_MODEL)..."; \
+        echo "Pre-caching chunker tokenizer model ($CHUNK_TOKENIZER_MODEL)..."; \
         HF_HUB_DOWNLOAD_TIMEOUT="90" HF_HUB_ETAG_TIMEOUT="90" \
-        python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained(\"$CHUNK_TOKENIZER_MODEL\")"' && \
+        python -c "from huggingface_hub import snapshot_download; snapshot_download(\"$CHUNK_TOKENIZER_MODEL\")"' && \
     chown -R 1001:0 ${DOCLING_SERVE_ARTIFACTS_PATH} ${HF_HOME} && \
     chmod -R g=u ${DOCLING_SERVE_ARTIFACTS_PATH} ${HF_HOME}
 USER 1001
@@ -128,6 +173,10 @@ RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     umask 002 && uv sync --frozen --no-dev --all-extras ${UV_SYNC_EXTRA_ARGS}
 
 ENV LD_PRELOAD=/usr/local/lib/libmimalloc.so
+
+# Point PySpice's NgSpiceShared binding straight at the baked shared library
+# (it honours NGSPICE_LIBRARY_PATH before falling back to ctypes find_library).
+ENV NGSPICE_LIBRARY_PATH=/usr/local/lib/libngspice.so
 
 # === Air-gapped / IL5 lockdown ===========================================
 # All models + the chunker tokenizer are baked above. Force the HuggingFace /

@@ -48,6 +48,10 @@ dependencies = [
     "python-pptx>=1.0.0,<2.0.0",
     "scikit-image>=0.24",
     "defusedxml>=0.7.1,<0.8.0",
+    # AccessDB extraction: pure-Python Jet/ACE reader (no ODBC, no mdbtools CLI).
+    "access-parser>=0.0.6,<0.1.0",
+    # Schematic SPICE simulation: in-process libngspice binding (no ngspice CLI).
+    "PySpice>=1.5,<2.0.0",
     "fastapi[standard]<0.137.0",
     "httpx~=0.28",
     "pydantic~=2.10",

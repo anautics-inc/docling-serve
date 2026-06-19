@@ -97,6 +97,13 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
+from docling_serve.graph import (
+    GraphExtractionUnavailable,
+    GraphExtractRequest,
+    GraphExtractResponse,
+    graph_payload_from_text,
+    resolve_profile_template,
+)
 from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends
 from docling_serve.logging_config import setup_logging
 from docling_serve.orchestrator_factory import get_async_orchestrator
@@ -1012,35 +1019,30 @@ def create_app():  # noqa: C901
     # {nodes, edges, labels, edgeLabels, nodeCount, edgeCount, ...}; an empty graph
     # plus a `note` when graph extraction is unconfigured/unavailable, so callers
     # (pytology) degrade uniformly instead of erroring.
-    @app.post("/v1/graph/extract", tags=["graph"])
-    async def extract_graph(
+    @app.post("/v1/graph/extract", tags=["graph"], response_model=GraphExtractResponse)
+    def extract_graph(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
-        body: dict,
-    ):
-        from docling_serve.graph import GraphExtractionUnavailable, graph_payload_from_text
-        from docling_serve.graph.templates import resolve_profile_template
-
-        text = str(body.get("text") or "")
-        template = body.get("template")
-        if not template:
-            template = resolve_profile_template(str(body.get("profile") or "") or None)
+        body: GraphExtractRequest,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+    ) -> GraphExtractResponse:
+        template = body.template or resolve_profile_template(body.profile)
+        # Forward the tenant to the proxy as a spend tag (the proxy key is
+        # service-scoped, so this is how graph-extraction spend is attributed).
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        identity_headers = {"x-tenant-id": tenant_id} if tenant_id else None
         try:
-            return graph_payload_from_text(
-                text, template=template if isinstance(template, str) else None
+            payload = graph_payload_from_text(
+                body.text, template=template, identity_headers=identity_headers
             )
         except GraphExtractionUnavailable as err:
-            return {
-                "nodes": [],
-                "edges": [],
-                "labels": {},
-                "edgeLabels": {},
-                "nodeCount": 0,
-                "edgeCount": 0,
-                "note": str(err),
-            }
+            _log.info("Graph extraction unavailable: %s", err)
+            return GraphExtractResponse(note=str(err))
+        return GraphExtractResponse(**payload)
 
     # Microsoft Access (.mdb/.accdb) — docling has no Access backend, so this gap is
-    # filled by converting the database to docling-native markdown tables (mdbtools),
+    # filled by converting the database to docling-native markdown tables (access-parser),
     # which chunking + graph extraction then consume out of the box.
     @app.post("/v1/extract/access", tags=["extract"])
     async def extract_access(
@@ -1089,10 +1091,15 @@ def create_app():  # noqa: C901
     async def extract_technical_order_route(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         files: list[UploadFile],
+        prefix: Annotated[str, Form()] = "",
+        bucket: Annotated[str, Form()] = "",
     ):
+        import json as _json
+        import shutil as _shutil
         import tempfile
         from pathlib import Path as _Path
 
+        from docling_serve.schematic.extract import publish_dir_to_s3
         from docling_serve.technical_order.extract import extract_technical_order
 
         if not files:
@@ -1104,15 +1111,72 @@ def create_app():  # noqa: C901
                 status_code=422, detail="extract/technical-order expects a .pdf file."
             )
         data = await upload.read()
-        tmp_path: _Path | None = None
+        work = _Path(tempfile.mkdtemp(prefix="technical-order-"))
         try:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
-                handle.write(data)
-                tmp_path = _Path(handle.name)
-            return extract_technical_order(tmp_path, source_key=name)
+            src = work / name
+            src.write_bytes(data)
+            # When publishing, figures render into the bundle's media/ dir so the
+            # callout<->part hotspots + figure images publish with the BOM.
+            target_bucket = (
+                bucket or docling_serve_settings.artifact_storage_bucket or ""
+            ).strip()
+            will_publish = bool(prefix and target_bucket)
+            bundle = work / "bundle"
+            media_dir = (bundle / "media") if will_publish else None
+            # Sonnet-4.5 vision recall booster for figure callouts OCR misses
+            # (LiteLLM/Bedrock). Only when enabled + the proxy is configured.
+            vision_cfg = None
+            if (
+                docling_serve_settings.figure_hotspot_vision
+                and docling_serve_settings.litellm_base_url
+                and docling_serve_settings.litellm_api_key
+            ):
+                vision_cfg = {
+                    "base_url": docling_serve_settings.litellm_base_url,
+                    "api_key": docling_serve_settings.litellm_api_key,
+                    "model": docling_serve_settings.bedrock_vision_model,
+                    "min_recall": docling_serve_settings.figure_hotspot_vision_min_recall,
+                    "max_calls": docling_serve_settings.figure_hotspot_vision_max_calls,
+                }
+            payload = extract_technical_order(
+                src, source_key=name, media_dir=media_dir, vision=vision_cfg
+            )
+
+            # Lay down the same S3 bundle the consumers poll: extraction.json
+            # (domain == "technical-order") + bom.json (captify.bom.v1) + media/
+            # figure sheets. Only for an actual parts list — a non-TO PDF parses
+            # to zero entries and must not create empty BOM scaffolding.
+            published: list[str] = []
+            if will_publish and int(payload.get("entryCount") or 0) > 0:
+                bundle.mkdir(parents=True, exist_ok=True)
+                (bundle / "bom.json").write_text(
+                    _json.dumps(payload.get("bom") or {}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                (bundle / "extraction.json").write_text(
+                    _json.dumps(
+                        {
+                            "domain": "technical-order",
+                            "technicalOrder": {"bom": "bom.json"},
+                            "documentNumber": payload.get("documentNumber"),
+                            "documentType": payload.get("documentType"),
+                            "entryCount": payload.get("entryCount"),
+                            "figureCount": payload.get("figureCount"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                published = publish_dir_to_s3(bundle, bucket=target_bucket, prefix=prefix)
+            return {
+                **payload,
+                "s3Keys": published,
+                "bucket": target_bucket if published else None,
+                "prefix": prefix if published else None,
+            }
         finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+            _shutil.rmtree(work, ignore_errors=True)
 
     # Schematic (engineering drawing) extraction — the wiring GEOMETRY docling can't
     # recover (component symbols + the nets connecting their pins) is produced here as

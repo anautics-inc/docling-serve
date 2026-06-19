@@ -1,4 +1,10 @@
-"""Generic schematic simulation: classify the drawing, build a deck, run ngspice.
+"""Generic schematic simulation: classify the drawing, build a deck, solve it.
+
+The numerical engine is ngspice, driven **in-process through PySpice's
+``NgSpiceShared`` cffi binding** (libngspice) rather than the ngspice CLI — so
+results come back as structured node/branch arrays instead of scraped text, and
+the dependency is a locked PyPI wheel binding a libngspice baked into the image
+(no ngspice OS package, no EPEL).
 
 Works for ANY extracted schematic, with honesty about what a simulation can
 mean at each fidelity level:
@@ -25,12 +31,8 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
-import subprocess
-import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -201,8 +203,10 @@ def simulate_graph(
 
     classification = classify_schematic(graph)
     result = SimulationResult(classification=classification)
-    if not shutil.which("ngspice"):
-        result.warnings.append("ngspice is not installed on the extraction host")
+    if not _ngspice_available():
+        result.warnings.append(
+            "libngspice is not available (PySpice could not load it on this host)"
+        )
         return result
 
     auto_supplies, grounds = detect_power_nets(graph)
@@ -246,7 +250,7 @@ def simulate_graph(
 
     netlist = graph_to_spice(graph, source_name=source_name)
     deck = _build_deck(netlist, graph, supplies=supplies, grounds=grounds)
-    ok, voltages, currents, log = _run_ngspice(deck, timeout_s=timeout_s)
+    ok, voltages, currents, log = _run_pyspice(deck, timeout_s=timeout_s)
     result.ok = ok
     result.nodeVoltages = voltages
     result.sourceCurrents = currents
@@ -323,48 +327,69 @@ def _build_deck(
     for index, supply in enumerate(supplies, start=1):
         node = _spice_node(graph, supply["net"])
         stimulus.append(f"V_SUP{index} {node} 0 DC {supply['volts']}")
-    control = "\n".join(
-        ["", ".control", "op", "print all", "quit", ".endc", ""]
-    )
-    return netlist.replace("\n.end\n", "\n" + "\n".join(stimulus) + control + ".end\n")
+    # ``.op`` is a batch analysis card (not an interactive ``.control`` block):
+    # NgSpiceShared.run() executes it and exposes the result as a plot, so there
+    # is no text to scrape and no ``quit`` that would tear down the shared library.
+    stimulus.append("")
+    stimulus.append(".op")
+    return netlist.replace("\n.end\n", "\n" + "\n".join(stimulus) + "\n.end\n")
 
 
-#: Names ``print all`` emits that are simulator constants, not circuit nodes.
-_NGSPICE_CONSTANTS = frozenset(
-    {"false", "true", "boltz", "c", "e", "echarge", "kelvin", "no", "pi", "planck", "yes", "i"}
-)
+def _ngspice_available() -> bool:
+    """True when PySpice can load libngspice (a real solve is possible)."""
+    try:
+        from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+
+        NgSpiceShared.new_instance()
+        return True
+    except Exception as err:  # ImportError or libngspice not found / load failure
+        _log.info("libngspice unavailable via PySpice: %s", err)
+        return False
 
 
-def _run_ngspice(
+def _run_pyspice(
     deck: str, *, timeout_s: float
 ) -> tuple[bool, dict[str, float], dict[str, float], str]:
-    with tempfile.NamedTemporaryFile("w", suffix=".cir", delete=False) as handle:
-        handle.write(deck)
-        path = handle.name
+    """Solve the ``.op`` deck through libngspice via PySpice's ``NgSpiceShared``.
+
+    Returns ``(ok, node_voltages, branch_currents, log)``. ``timeout_s`` is kept
+    for signature compatibility; a DC operating-point solve is effectively
+    instantaneous in-process, so no watchdog is applied. A missing library or a
+    rejected/non-converging deck degrades to ``ok=False`` with the captured log.
+    """
     try:
-        completed = subprocess.run(
-            ["ngspice", "-b", path], capture_output=True, text=True, timeout=timeout_s
-        )
-    finally:
-        Path(path).unlink(missing_ok=True)
-    output = completed.stdout + completed.stderr
-    lowered = output.lower()
-    failed = completed.returncode != 0 or "error" in lowered.replace("no error", "")
+        from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+    except Exception as err:  # pragma: no cover - dependency is locked in
+        return False, {}, {}, f"PySpice/libngspice unavailable: {err}"
+
+    try:
+        ngspice = NgSpiceShared.new_instance()
+        ngspice.load_circuit(deck)
+        ngspice.run()
+        analysis = ngspice.plot(None, ngspice.last_plot).to_analysis()
+    except Exception as err:
+        return False, {}, {}, f"libngspice solve failed: {err}"
+
     voltages: dict[str, float] = {}
     currents: dict[str, float] = {}
-    for line in output.splitlines():
-        match = re.match(r"^\s*([a-z0-9_.#@\[\]]+)\s*=\s*([-+0-9.eE]+)\s*$", line.strip(), re.IGNORECASE)
-        if not match:
-            continue
-        name, value = match.group(1), match.group(2)
-        if name.lower() in _NGSPICE_CONSTANTS:
-            continue
+    for node, waveform in (getattr(analysis, "nodes", {}) or {}).items():
+        value = _first_value(waveform)
+        if value is not None:
+            voltages[str(node)] = value
+    for branch, waveform in (getattr(analysis, "branches", {}) or {}).items():
+        value = _first_value(waveform)
+        if value is not None:
+            currents[str(branch)] = value
+    ok = bool(voltages)
+    return ok, voltages, currents, "" if ok else "no node voltages produced"
+
+
+def _first_value(waveform: Any) -> float | None:
+    """First sample of an OP waveform as a float (PySpice WaveForm / ndarray)."""
+    try:
+        return float(waveform[0])
+    except Exception:
         try:
-            number = float(value)
-        except ValueError:
-            continue
-        if name.lower().startswith(("v_sup", "v_gnd")) or "#branch" in name.lower():
-            currents[name] = number
-        else:
-            voltages[name] = number
-    return (not failed) and bool(voltages), voltages, currents, output[-2000:]
+            return float(waveform)
+        except Exception:
+            return None

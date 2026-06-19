@@ -106,6 +106,12 @@ class PartsListEntry:
     # Normalized [x0, y0, x1, y1] of the printed row on its page (fractions
     # of page size) — set by rowbox.attach_row_boxes for text-layer sources.
     row_box: tuple[float, float, float, float] | None = None
+    # Part -> callout link: where this part's index callout sits on its figure
+    # sheet (normalized box) and which rendered figure image it lives on. Set by
+    # the figure-hotspot pass so the UI can jump part -> illustration callout and
+    # know where to re-stamp the callout when the part reference changes.
+    callout_box: tuple[float, float, float, float] | None = None
+    figure_media_key: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -128,6 +134,8 @@ class PartsListEntry:
             "nomenclature": self.nomenclature,
             "reviewStatus": self.review_status,
             "validationFlags": self.validation_flags,
+            "calloutBox": list(self.callout_box) if self.callout_box else None,
+            "figureMediaKey": self.figure_media_key,
         }
 
 
@@ -283,7 +291,7 @@ def _snap_boundary(sample: list[str], anchor: int) -> int:
     return max(0, anchor - 2)
 
 
-def parse_parts_lists(
+def parse_parts_lists(  # noqa: C901 - single-pass MPL state machine; splitting hurts clarity
     pages: list[str], *, first_page_number: int = 1
 ) -> tuple[list[PartsListEntry], list[FigureRecord]]:
     """Parse every parts-list table across ``pages``.

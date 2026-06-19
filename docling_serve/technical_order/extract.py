@@ -37,6 +37,10 @@ TO_PROFILES = {
 }
 _TO_DOCUMENT_TYPES = {"TO-IPB", "TO-RPSTL"}
 _MPL_FAMILIES = {"mpl-modern", "mpl-legacy"}
+# Max page count for the full-document OCR fallback. Above this, tesseract over
+# every page costs minutes for documents that are almost always large RPSTL/TM
+# formats the column parser can't read regardless of text source.
+_OCR_PAGE_BUDGET = 180
 
 
 def looks_like_technical_order(pdf_path: Path) -> bool:
@@ -48,8 +52,20 @@ def looks_like_technical_order(pdf_path: Path) -> bool:
     return triage.document_type in _TO_DOCUMENT_TYPES or triage.format_family in _MPL_FAMILIES
 
 
-def extract_technical_order(pdf_path: Path, *, source_key: str = "") -> dict[str, Any]:
-    """Parse an IPB/RPSTL technical-order PDF into the ``captify.bom.v1`` payload."""
+def extract_technical_order(
+    pdf_path: Path,
+    *,
+    source_key: str = "",
+    media_dir: Path | None = None,
+    vision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parse an IPB/RPSTL technical-order PDF into the ``captify.bom.v1`` payload.
+
+    When ``media_dir`` is given, each figure sheet is rendered to a PNG there and
+    its index callouts are detected + linked to the parts list both ways (callout
+    -> part on the figure, part -> callout box on the entry), so the UI can jump
+    image<->part and re-stamp callouts when references change.
+    """
     if not pdf_path.is_file():
         raise FileNotFoundError(f"Technical order PDF not found: {pdf_path}")
 
@@ -67,10 +83,23 @@ def extract_technical_order(pdf_path: Path, *, source_key: str = "") -> dict[str
     metadata = parse_to_metadata(pages, filename=pdf_path.name)
     entries, figures = parse_parts_lists(pages)
 
-    # OCR fallback: a scanned TO whose text layer yielded no parts list gets a
-    # fresh tesseract pass; keep whichever source parsed more rows.
+    # OCR fallback: a scanned / dirty-legacy-OCR TO whose text layer yielded no
+    # parts list gets a fresh tesseract pass (this genuinely recovers rows on
+    # older IPBs whose embedded OCR layer the column parser can't align). Two
+    # guards keep it from burning minutes for no gain:
+    #   * born-digital docs are skipped — their text is clean, so a 0-row parse
+    #     means the *format* is unsupported (e.g. an Army TM RPSTL work package),
+    #     which re-OCR won't fix.
+    #   * documents above the page budget are skipped — full-document tesseract
+    #     on a 200-350pp manual costs minutes, and the big ones here are RPSTL/TM
+    #     formats the parser doesn't handle anyway.
     text_layer_source = True
-    if triage.extraction_class != "born-digital" and not entries and ocr_available():
+    if (
+        triage.extraction_class != "born-digital"
+        and not entries
+        and ocr_available()
+        and triage.page_count <= _OCR_PAGE_BUDGET
+    ):
         try:
             ocr_pages = ocr_page_texts(pdf_path)
         except Exception as err:
@@ -93,6 +122,23 @@ def extract_technical_order(pdf_path: Path, *, source_key: str = "") -> dict[str
         warnings.append(
             f"format_family={triage.format_family} but {len(entries)} MPL rows parsed"
         )
+
+    # Figure callouts <-> parts (clickable hotspots). Render each figure sheet,
+    # OCR its index callouts, and wire the bidirectional link. Best-effort and
+    # only when a media directory is provided (the publish path).
+    if media_dir is not None and entries and figures:
+        try:
+            from docling_serve.technical_order.figure_hotspots import attach_hotspots
+
+            hs_stats = attach_hotspots(pdf_path, entries, figures, media_dir, vision=vision)
+            notes.append(
+                f"figure hotspots: {hs_stats['hotspots']} callouts on "
+                f"{hs_stats['rendered']} sheet(s) "
+                f"({hs_stats.get('visionHotspots', 0)} via vision), "
+                f"{hs_stats['linkedParts']} parts linked"
+            )
+        except Exception as err:  # pragma: no cover - rendering env dependent
+            warnings.append(f"figure hotspot pass failed: {err}")
 
     bom = build_bom_payload(
         pdf_path=pdf_path,

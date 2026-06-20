@@ -1,17 +1,19 @@
 import enum
 import json
-import sys
+import logging
 from pathlib import Path
 from typing import Any, Optional, Union
 
 import yaml
-from pydantic import AnyUrl, Field, field_validator, model_validator
+from pydantic import AnyUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
 from typing_extensions import Self
+
+_log = logging.getLogger(__name__)
 
 
 class UvicornSettings(BaseSettings):
@@ -77,7 +79,11 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
                     return {}
             return data if isinstance(data, dict) else {}
         except Exception:
-            return {}
+            # Fail closed: a malformed config file must be loud, not silently
+            # ignored (Article VII.4) — a swallowed parse error hides
+            # misconfiguration and can leave the service running with defaults.
+            _log.error("Failed to load config file %s", config_path, exc_info=True)
+            raise
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
@@ -115,11 +121,19 @@ class DoclingServeSettings(BaseSettings):
     show_version_info: bool = True
     enable_management_endpoints: bool = False
 
-    api_key: str = ""
+    # SecretStr so the key never leaks via repr()/model_dump() on this
+    # extra="allow" model (Article VI.3). None/empty disables auth (upstream
+    # behavior); the validator below fails closed unless explicitly opted out.
+    api_key: Optional[SecretStr] = None
+    # Fail closed: an empty api_key disables auth (upstream behavior). Require an
+    # explicit opt-in to run unauthenticated; otherwise startup refuses to boot.
+    allow_unauthenticated: bool = False
 
-    max_document_timeout: float = 3_600 * 24 * 7  # 7 days
-    max_num_pages: int = sys.maxsize
-    max_file_size: int = sys.maxsize
+    # Conservative Captify production defaults (upstream ships effectively
+    # unbounded values). All remain env-overridable; see .env.example.
+    max_document_timeout: float = 300  # seconds
+    max_num_pages: int = 5000
+    max_file_size: int = 314572800  # 300 MiB
 
     # Threading pipeline
     queue_max_size: Optional[int] = None
@@ -252,9 +266,9 @@ class DoclingServeSettings(BaseSettings):
     # values win over the shared litellm_* so graph extraction can target a different
     # proxy/model. Unset → /v1/graph/extract returns an empty graph (note=litellm_not_configured).
     litellm_base_url: Optional[str] = None
-    litellm_api_key: Optional[str] = None
+    litellm_api_key: Optional[SecretStr] = None
     graph_litellm_base_url: Optional[str] = None
-    graph_litellm_api_key: Optional[str] = None
+    graph_litellm_api_key: Optional[SecretStr] = None
     graph_litellm_model: str = "bedrock-claude-sonnet-4-6"
     graph_litellm_provider: str = "litellm_proxy"
     # Dotted import path to a default docling-graph Pydantic template; a request's
@@ -265,6 +279,9 @@ class DoclingServeSettings(BaseSettings):
     graph_extraction_max_chars: int = 200_000
     graph_extraction_max_output_tokens: int = 32_000
     graph_extraction_context_limit: int = 200_000
+    # Wall-clock ceiling for a single remote graph-extraction LLM run (seconds);
+    # bounds the proxy call so a stuck request cannot hang the worker forever.
+    graph_extraction_timeout_s: float = 120.0
 
     # OpenTelemetry settings
     otel_enable_metrics: bool = True
@@ -445,6 +462,26 @@ class DoclingServeSettings(BaseSettings):
                     "Use 'auto' or 'local' for local Ray, or provide a Ray cluster address."
                 )
 
+        return self
+
+    @model_validator(mode="after")
+    def require_api_key_or_explicit_opt_in(self) -> Self:
+        """Fail closed when auth would be silently disabled.
+
+        An empty ``api_key`` makes the ``X-Api-Key`` check pass for everyone
+        (upstream behavior). Refuse to start in that state unless the operator
+        explicitly opts into unauthenticated mode, so a missing key cannot ship
+        an unprotected service by accident (Article VI.1 / N5).
+        """
+        if (
+            self.api_key is None or self.api_key.get_secret_value() == ""
+        ) and not self.allow_unauthenticated:
+            raise ValueError(
+                "Authentication is disabled because no API key is configured. "
+                "Set DOCLING_SERVE_API_KEY to a non-empty secret, or explicitly "
+                "opt into unauthenticated mode with "
+                "DOCLING_SERVE_ALLOW_UNAUTHENTICATED=true."
+            )
         return self
 
 

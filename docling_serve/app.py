@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import logging
 import os
+import re
 import shutil
 import time
 from collections import Counter
@@ -154,6 +155,17 @@ for handler in root_logger.handlers:  # Iterate through existing handlers
 
 _log = logging.getLogger(__name__)
 
+# Caller-supplied tenant ids are forwarded to the LiteLLM proxy only as a spend
+# tag (never an authz boundary). Restrict the value to a safe charset before
+# relaying it so an arbitrary header cannot be smuggled outbound.
+_TENANT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _is_valid_tenant_id(tenant_id: str | None) -> bool:
+    """True when ``tenant_id`` is safe to forward as an outbound proxy header."""
+    return bool(tenant_id) and _TENANT_ID_RE.match(tenant_id or "") is not None
+
+
 # Tracks whether warm_up_caches() has completed.  Meaningful only for the
 # LocalOrchestrator (which eagerly loads ML models); the RQ orchestrator's
 # implementation is a no-op so this event fires instantly in RQ deployments.
@@ -225,7 +237,11 @@ def create_app():  # noqa: C901
         offline_docs_assets = True
         _log.info("Found static assets.")
 
-    require_auth = APIKeyAuth(docling_serve_settings.api_key)
+    require_auth = APIKeyAuth(
+        docling_serve_settings.api_key.get_secret_value()
+        if docling_serve_settings.api_key
+        else ""
+    )
     service_policy = build_service_policy(docling_serve_settings)
     app = FastAPI(
         title="Docling Serve",
@@ -398,11 +414,11 @@ def create_app():  # noqa: C901
         metadata = {}
         if tenant_id:
             metadata["tenant_id"] = tenant_id
-            _log.info(
+            _log.debug(
                 f"[TENANT_ID] Preparing to enqueue with tenant_id='{tenant_id}' in metadata"
             )
         else:
-            _log.warning("[TENANT_ID] No tenant_id provided, will use default")
+            _log.debug("[TENANT_ID] No tenant_id provided, will use default")
 
         task = await orchestrator.enqueue(
             task_type=task_type,
@@ -415,7 +431,7 @@ def create_app():  # noqa: C901
             metadata=metadata,
         )
 
-        _log.info(
+        _log.debug(
             f"[TENANT_ID] Task {task.task_id} created with tenant_id='{tenant_id or 'default'}'"
         )
 
@@ -432,7 +448,7 @@ def create_app():  # noqa: C901
         callbacks: list[CallbackSpec] | None = None,
         tenant_id: str | None = None,
     ) -> Task:
-        _log.info(
+        _log.debug(
             f"[TENANT_ID] _enque_file called with tenant_id='{tenant_id}', "
             f"processing {len(files)} files"
         )
@@ -447,7 +463,7 @@ def create_app():  # noqa: C901
 
             # Log file details for debugging transmission issues
             file_hash = hashlib.md5(file_bytes, usedforsecurity=False).hexdigest()[:12]
-            _log.info(
+            _log.debug(
                 f"File {i}: name={name}, size={len(file_bytes)} bytes, "
                 f"md5={file_hash}, content_type={file.content_type}"
             )
@@ -470,7 +486,7 @@ def create_app():  # noqa: C901
             metadata=metadata,
         )
 
-        _log.info(
+        _log.debug(
             f"[TENANT_ID] File task {task.task_id} created with tenant_id='{tenant_id or 'default'}'"
         )
 
@@ -479,10 +495,7 @@ def create_app():  # noqa: C901
     def _get_tenant_id_from_header(tenant_id_header: str | None) -> str:
         """Extract tenant_id from header or return default."""
         tenant_id = tenant_id_header or "default"
-        _log.info(
-            f"[TENANT_ID] Extracted tenant_id from header: '{tenant_id}' "
-            f"(header_value: '{tenant_id_header}')"
-        )
+        _log.debug(f"[TENANT_ID] Extracted tenant_id from header: '{tenant_id}'")
         return tenant_id
 
     async def _wait_task_complete(orchestrator: BaseOrchestrator, task_id: str) -> bool:
@@ -686,7 +699,7 @@ def create_app():  # noqa: C901
     ):
         conversion_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        _log.info(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
+        _log.debug(f"[TENANT_ID] process_url endpoint received tenant_id='{tenant_id}'")
         task = await _enque_source(
             orchestrator=orchestrator, request=conversion_request, tenant_id=tenant_id
         )
@@ -741,7 +754,9 @@ def create_app():  # noqa: C901
     ):
         options = _prepare_convert_options(options)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        _log.info(f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'")
+        _log.debug(
+            f"[TENANT_ID] process_file endpoint received tenant_id='{tenant_id}'"
+        )
         target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
         task = await _enque_file(
             task_type=TaskType.CONVERT,
@@ -795,7 +810,7 @@ def create_app():  # noqa: C901
     ):
         conversion_request = _prepare_convert_request(conversion_request)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        _log.info(
+        _log.debug(
             f"[TENANT_ID] process_url_async endpoint received tenant_id='{tenant_id}'"
         )
         task = await _enque_source(
@@ -834,7 +849,7 @@ def create_app():  # noqa: C901
     ):
         options = _prepare_convert_options(options)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        _log.info(
+        _log.debug(
             f"[TENANT_ID] process_file_async endpoint received tenant_id='{tenant_id}'"
         )
         target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
@@ -886,7 +901,7 @@ def create_app():  # noqa: C901
         ):
             request = _prepare_chunk_request(request)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
-            _log.info(
+            _log.debug(
                 f"[TENANT_ID] chunk_source_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             task = await _enque_source(
@@ -950,7 +965,7 @@ def create_app():  # noqa: C901
         ):
             convert_options = _prepare_convert_options(convert_options)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
-            _log.info(
+            _log.debug(
                 f"[TENANT_ID] chunk_file_async ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
@@ -1003,7 +1018,7 @@ def create_app():  # noqa: C901
         ):
             request = _prepare_chunk_request(request)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
-            _log.info(
+            _log.debug(
                 f"[TENANT_ID] chunk_source ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             task = await _enque_source(
@@ -1085,7 +1100,7 @@ def create_app():  # noqa: C901
         ):
             convert_options = _prepare_convert_options(convert_options)
             tenant_id = _get_tenant_id_from_header(x_tenant_id)
-            _log.info(
+            _log.debug(
                 f"[TENANT_ID] chunk_file ({path_name}) endpoint received tenant_id='{tenant_id}'"
             )
             target = InBodyTarget() if target_type == TargetName.INBODY else ZipTarget()
@@ -1145,7 +1160,11 @@ def create_app():  # noqa: C901
         # Forward the tenant to the proxy as a spend tag (the proxy key is service-scoped,
         # so this is how graph-extraction spend is attributed per tenant).
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        identity_headers = {"x-tenant-id": tenant_id} if tenant_id else None
+        # Only forward a tenant id that matches the safe charset; drop it
+        # otherwise so an arbitrary caller header is never relayed to the proxy.
+        identity_headers = (
+            {"x-tenant-id": tenant_id} if _is_valid_tenant_id(tenant_id) else None
+        )
         try:
             payload = graph_payload_from_text(
                 body.text, template=template, identity_headers=identity_headers
@@ -1192,14 +1211,19 @@ def create_app():  # noqa: C901
         websocket: WebSocket,
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         task_id: str,
+        x_api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
+        # The ?api_key= query param leaks the secret into URLs/logs and is
+        # deprecated in favor of the X-Api-Key header; kept one release as a fallback.
         api_key: Annotated[str, Query()] = "",
     ):
-        if docling_serve_settings.api_key:
-            if api_key != docling_serve_settings.api_key:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Api key is required as ?api_key=SECRET.",
-                )
+        configured = docling_serve_settings.api_key
+        if configured:
+            provided = x_api_key or api_key
+            if provided != configured.get_secret_value():
+                # Starlette cannot return a clean 401 during the WS handshake, so
+                # close with policy-violation (1008) instead of raising.
+                await websocket.close(code=1008)
+                return
 
         assert isinstance(orchestrator.notifier, WebsocketNotifier)
         await websocket.accept()

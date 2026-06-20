@@ -243,7 +243,9 @@ def create_app():  # noqa: C901
     require_auth = APIKeyAuth(
         docling_serve_settings.api_key.get_secret_value()
         if docling_serve_settings.api_key
-        else ""
+        else "",
+        allow_unauthenticated=docling_serve_settings.allow_unauthenticated,
+        allow_private_networks=docling_serve_settings.auth_allow_private_networks,
     )
     service_policy = build_service_policy(docling_serve_settings)
     app = FastAPI(
@@ -1222,10 +1224,14 @@ def create_app():  # noqa: C901
         task_id: str,
         x_api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
     ):
-        configured = docling_serve_settings.api_key
-        if configured:
+        # Same IP-aware gate as the HTTP dependency: loopback/private clients are
+        # exempt; public clients must present a valid X-Api-Key.
+        if require_auth.request_requires_key(websocket):
+            configured = docling_serve_settings.api_key
             provided = x_api_key or ""
-            if not hmac.compare_digest(provided, configured.get_secret_value()):
+            if not configured or not hmac.compare_digest(
+                provided, configured.get_secret_value()
+            ):
                 # Starlette cannot return a clean 401 during the WS handshake, so
                 # close with policy-violation (1008) instead of raising.
                 await websocket.close(code=1008)

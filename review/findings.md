@@ -115,3 +115,19 @@ failures remain. **Verdict: PASS — cleared to commit.**
   live-server suites (no server). Scoped the job to the fast deterministic unit
   set; live-server `test_1-*/test_2-*` are conftest-ignored unless
   `DOCLING_SERVE_RUN_INTEGRATION=1`.
+
+## Round 4 — IP-aware auth (local installs don't require a key)
+
+Per request: `DOCLING_SERVE_API_KEY` is now required only for **non-local** callers.
+
+- `auth.is_private_client()` (ipaddress: loopback/RFC1918/link-local/ULA) gates on
+  the socket peer only — `X-Forwarded-For` is NOT trusted (documented caveat: behind
+  a private-network proxy, set `auth_allow_private_networks=false` + a key).
+- `APIKeyAuth` exempts private clients (and `allow_unauthenticated`); public clients
+  must present a valid key, and are rejected if none is configured.
+- Websocket reuses the same `request_requires_key()` gate.
+- `validate_serving_auth_mode()` no longer fails closed on a missing key (local
+  installs boot); it raises only in the unusable fully-locked config (no key + no
+  private bypass + not unauthenticated).
+- New setting `auth_allow_private_networks: bool = True`. Docs updated
+  (.env.example, constitution VI.1). 20 auth tests pass; fast unit set 94 passed.

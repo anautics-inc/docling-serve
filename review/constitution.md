@@ -160,11 +160,16 @@ template-driven, schema-validated extraction via `docling-graph` over LiteLLM.
 
 ## Article VI — Security & multi-tenancy
 
-1. **Auth fails closed.** Endpoints require `X-Api-Key` via the shared
-   `require_auth` dependency. An empty configured key must NOT silently disable auth
-   in any environment intended to be protected; production startup MUST refuse to
-   run unprotected (or log a single unmissable warning + require an explicit
-   `allow_unauthenticated` opt-in).
+1. **Auth is IP-aware and fails closed for public callers.** Endpoints require
+   `X-Api-Key` via the shared `require_auth` dependency for any non-local caller.
+   Loopback/private (RFC1918/link-local/ULA) clients are exempt by default
+   (`auth_allow_private_networks`) so a local install runs with no key, while a
+   public caller is rejected when no key is configured — the service can never be
+   silently exposed unauthenticated. The private-network check trusts only the
+   socket peer, never `X-Forwarded-For`; behind a private-network proxy, set
+   `auth_allow_private_networks=false` + a key. `allow_unauthenticated=true` (full
+   bypass) is dev/test only. Startup refuses to run only in the unusable
+   fully-locked config (no key, no private bypass, not unauthenticated).
 2. **Every new endpoint is authenticated by default** and uses the header-based
    dependency. **No secrets in query parameters** — the websocket key-as-query-param
    pattern is a known defect to be migrated to a header/subprotocol, not copied.

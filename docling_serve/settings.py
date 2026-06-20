@@ -125,9 +125,17 @@ class DoclingServeSettings(BaseSettings):
     # extra="allow" model (Article VI.3). None/empty disables auth (upstream
     # behavior); the validator below fails closed unless explicitly opted out.
     api_key: Optional[SecretStr] = None
-    # Fail closed: an empty api_key disables auth (upstream behavior). Require an
-    # explicit opt-in to run unauthenticated; otherwise startup refuses to boot.
+    # Auth model (see auth.APIKeyAuth):
+    #   * allow_unauthenticated=True  -> every request is allowed (dev/test only).
+    #   * else, requests from loopback/private (RFC1918/link-local/ULA) clients
+    #     are allowed WITHOUT a key when auth_allow_private_networks is True
+    #     (default) — so a local install boots and works with no key; public
+    #     clients must present DOCLING_SERVE_API_KEY.
+    # NOTE: the private-network check uses the socket peer, not X-Forwarded-For
+    # (spoofable). Behind a reverse proxy the peer is the proxy, so to require a
+    # key per external client set auth_allow_private_networks=false AND a key.
     allow_unauthenticated: bool = False
+    auth_allow_private_networks: bool = True
 
     # Conservative Captify production defaults (upstream ships effectively
     # unbounded values). All remain env-overridable; see .env.example.
@@ -465,22 +473,23 @@ class DoclingServeSettings(BaseSettings):
         return self
 
     def validate_serving_auth_mode(self) -> None:
-        """Fail closed when auth would be silently disabled.
+        """Refuse to start only when NO request could ever be authorized.
 
-        An empty ``api_key`` makes the ``X-Api-Key`` check pass for everyone
-        (upstream behavior). Refuse to start the serving app in that state unless
-        the operator explicitly opts into unauthenticated mode, so a missing key
-        cannot ship an unprotected service by accident (Article VI.1 / N5).
+        With the IP-aware model, a missing key is safe: loopback/private clients
+        are allowed (so local installs work) and public clients are rejected. The
+        single unprotected-yet-unusable configuration is no key + private bypass
+        disabled + not explicitly unauthenticated, which would reject everything —
+        fail loudly there instead of silently serving 401s (Article VI.1 / N5).
         """
-        if (
-            self.api_key is None or self.api_key.get_secret_value() == ""
-        ) and not self.allow_unauthenticated:
-            raise ValueError(
-                "Authentication is disabled because no API key is configured. "
-                "Set DOCLING_SERVE_API_KEY to a non-empty secret, or explicitly "
-                "opt into unauthenticated mode with "
-                "DOCLING_SERVE_ALLOW_UNAUTHENTICATED=true."
-            )
+        has_key = self.api_key is not None and self.api_key.get_secret_value() != ""
+        if has_key or self.allow_unauthenticated or self.auth_allow_private_networks:
+            return
+        raise ValueError(
+            "No API key is configured and private-network bypass is disabled, so "
+            "every request would be rejected. Set DOCLING_SERVE_API_KEY, or set "
+            "DOCLING_SERVE_AUTH_ALLOW_PRIVATE_NETWORKS=true, or "
+            "DOCLING_SERVE_ALLOW_UNAUTHENTICATED=true."
+        )
 
 
 uvicorn_settings = UvicornSettings()

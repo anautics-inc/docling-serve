@@ -1,55 +1,113 @@
-"""Auth behavior for the shared ``APIKeyAuth`` dependency (Article VI.1).
+"""Auth behavior for the IP-aware ``APIKeyAuth`` dependency + startup validator.
 
-Covers the two regimes that matter for fail-closed/fail-open semantics:
-  * no key configured  -> the comparison is permissive (auth effectively open;
-    the fail-closed guard lives in settings, not here);
-  * key configured      -> only an exact match validates.
-
-These exercise the pure ``_validate_api_key`` coroutine (no network, no FastAPI
-request plumbing). They run as pytest-asyncio tests (``asyncio_mode = auto``) so
-the event loop is managed per-test and not closed globally — calling
-``asyncio.run`` here would unset the loop and break session-scoped loop fixtures
-in other test modules.
+A key is required only for non-exempt callers: ``allow_unauthenticated`` exempts
+everyone (dev/test), and ``allow_private_networks`` (default) exempts loopback/
+private clients so a local install works with no key while public clients still
+need one. These exercise the pure dependency with synthetic requests — no network.
 """
 
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
-from docling_serve.auth import APIKeyAuth
+from docling_serve.auth import APIKeyAuth, is_private_client
 from docling_serve.settings import DoclingServeSettings
 
 
+def _request(client_host: str | None, api_key_header: str | None = None) -> Request:
+    headers = []
+    if api_key_header is not None:
+        headers.append((b"x-api-key", api_key_header.encode()))
+    scope = {
+        "type": "http",
+        "headers": headers,
+        "client": (client_host, 12345) if client_host else None,
+    }
+    return Request(scope)
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        ("127.0.0.1", True),
+        ("::1", True),
+        ("10.1.2.3", True),
+        ("192.168.5.5", True),
+        ("172.16.0.1", True),
+        ("169.254.1.1", True),
+        ("fd00::1", True),
+        ("8.8.8.8", False),
+        ("1.1.1.1", False),
+        (None, False),
+        ("not-an-ip", False),
+    ],
+)
+def test_is_private_client(host, expected):
+    assert is_private_client(host) is expected
+
+
 @pytest.mark.asyncio
-async def test_unset_key_accepts_any_provided_header():
-    auth = APIKeyAuth("")
-
-    assert (await auth._validate_api_key("anything")).valid is True
-    assert (await auth._validate_api_key("")).valid is True
-    # A missing header still reports invalid, but __call__ does not raise when no
-    # key is configured, so the endpoint stays open (upstream behavior).
-    assert (await auth._validate_api_key(None)).valid is False
+async def test_private_client_needs_no_key():
+    auth = APIKeyAuth("", allow_private_networks=True)
+    assert (await auth(_request("127.0.0.1"))).valid is True
 
 
 @pytest.mark.asyncio
-async def test_set_key_requires_exact_match():
-    auth = APIKeyAuth("s3cr3t")
-
-    assert (await auth._validate_api_key("s3cr3t")).valid is True
-    # Surrounding whitespace is stripped before comparison.
-    assert (await auth._validate_api_key("  s3cr3t  ")).valid is True
-
-    assert (await auth._validate_api_key("wrong")).valid is False
-    assert (await auth._validate_api_key(None)).valid is False
+async def test_private_client_bypasses_even_when_key_configured():
+    auth = APIKeyAuth("s3cr3t", allow_private_networks=True)
+    assert (await auth(_request("10.0.0.5"))).valid is True
 
 
-def test_validate_serving_auth_mode_fails_closed_without_key():
-    settings = DoclingServeSettings(api_key=None, allow_unauthenticated=False)
+@pytest.mark.asyncio
+async def test_public_client_with_no_key_configured_is_rejected():
+    auth = APIKeyAuth("", allow_private_networks=True)
+    with pytest.raises(HTTPException) as exc:
+        await auth(_request("8.8.8.8"))
+    assert exc.value.status_code == 401
 
+
+@pytest.mark.asyncio
+async def test_public_client_requires_matching_key():
+    auth = APIKeyAuth("s3cr3t", allow_private_networks=True)
+    assert (await auth(_request("8.8.8.8", "s3cr3t"))).valid is True
+    with pytest.raises(HTTPException):
+        await auth(_request("8.8.8.8", "wrong"))
+    with pytest.raises(HTTPException):
+        await auth(_request("8.8.8.8"))
+
+
+@pytest.mark.asyncio
+async def test_allow_unauthenticated_exempts_public_clients():
+    auth = APIKeyAuth("", allow_unauthenticated=True)
+    assert (await auth(_request("8.8.8.8"))).valid is True
+
+
+@pytest.mark.asyncio
+async def test_private_bypass_disabled_requires_key_for_local():
+    auth = APIKeyAuth("s3cr3t", allow_private_networks=False)
+    assert (await auth(_request("127.0.0.1", "s3cr3t"))).valid is True
+    with pytest.raises(HTTPException):
+        await auth(_request("127.0.0.1"))
+
+
+def test_validate_serving_auth_mode_ok_with_private_bypass():
+    # No key, but private bypass on (default): local works, public is rejected.
+    DoclingServeSettings(
+        api_key=None, allow_unauthenticated=False
+    ).validate_serving_auth_mode()
+
+
+def test_validate_serving_auth_mode_ok_with_key():
+    DoclingServeSettings(
+        api_key="s3cr3t", auth_allow_private_networks=False
+    ).validate_serving_auth_mode()
+
+
+def test_validate_serving_auth_mode_fails_when_fully_locked():
+    settings = DoclingServeSettings(
+        api_key=None,
+        allow_unauthenticated=False,
+        auth_allow_private_networks=False,
+    )
     with pytest.raises(ValueError):
         settings.validate_serving_auth_mode()
-
-    DoclingServeSettings(
-        api_key=None, allow_unauthenticated=True
-    ).validate_serving_auth_mode()
-    DoclingServeSettings(
-        api_key="s3cr3t", allow_unauthenticated=False
-    ).validate_serving_auth_mode()

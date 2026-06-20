@@ -453,3 +453,10 @@ cookies.txt
 
 # Examples
 /examples/splitted_pdf/*
+
+# Local test inputs / scratch artifacts — not part of the repo
+tests/tos/
+tests/test_files/
+tests/trash/
+tests/*.zip
+docs/*.zip

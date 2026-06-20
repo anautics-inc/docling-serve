@@ -91,7 +91,17 @@ lint:
   tags:
     - al2023-fips-shell
   rules:
-    - when: never
+    - when: always
+
+typecheck:
+  extends: .uv_bootstrap
+  stage: build
+  script:
+    - uv run mypy docling_serve/graph docling_serve/policy.py docling_serve/settings.py
+  tags:
+    - al2023-fips-shell
+  rules:
+    - when: always
 
 build-wheel:
   extends: .uv_bootstrap
@@ -195,12 +205,14 @@ unit-tests:
       artifacts: true
   variables:
     DOCLING_SERVE_ENABLE_UI: "false"
+    # Settings fail closed when no API key is configured; CI runs unauthenticated.
+    DOCLING_SERVE_ALLOW_UNAUTHENTICATED: "true"
   script:
     - uv run pytest tests/ -x -q --tb=short
   tags:
     - al2023-fips-shell
   rules:
-    - when: never
+    - when: always
 
 # Override the GitLab dependency-scanning template job to enforce it always runs.
 # Note: dependency_scanning (underscore) is a configuration-only stub — the real
@@ -528,9 +540,6 @@ package-documents:
     - sed -i "s|{{container_port}}|$CONTAINER_PORT|g"      deploy.sh
     - sed -i "s|{{env_file_b64}}|$ENV_FILE_B64|g"          deploy.sh
     - chmod +x deploy.sh
-    - echo "===== Rendered deploy.sh ====="
-    - cat deploy.sh
-    - echo "=============================="
 
     # ── SEND VIA SSM ──────────────────────────────────────────────────────────
     - |

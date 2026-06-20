@@ -279,6 +279,7 @@ ignore = [
     "PL", # Pylint
     "RUF012", # Mutable Class Attributes
     "UP007", # Option and Union
+    "UP045", # Optional[X] over X | None (UP007 successor in ruff >=0.11; same intent)
 ]
 
 #extend-select = []
@@ -286,6 +287,9 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
 "tests/*.py" = ["ASYNC"] # Disable ASYNC check for tests
+# CLI-only debug tool (Article VII.2): never imported by serving code, so the
+# async-IO lint (os.path in an async def) does not apply.
+"docling_serve/tools/debug_ray_state.py" = ["ASYNC"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 15
@@ -334,7 +338,7 @@ minversion = "8.2"
 testpaths = [
     "tests",
 ]
-addopts = "-rA --color=yes --tb=short --maxfail=5"
+addopts = "-rA --color=yes --tb=short --maxfail=5 --ignore=tests/trash"
 markers = [
 "asyncio",
 ]

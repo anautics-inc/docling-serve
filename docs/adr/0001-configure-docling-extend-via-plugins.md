@@ -94,6 +94,43 @@ plugin against a `.mdb`; and the schematic pipeline plugin against
 `main_schematic.pdf`. Confirm the whole flow runs with the HF stack forced
 offline.
 
+## FIPS self-test bypass (auditable hack)
+
+The runner hosts that build our image are FIPS-enabled (`/proc/sys/crypto/
+fips_enabled` reads `1`). PyTorch ships its own OpenSSL 1.x, which runs a FIPS
+power-on self-test at import; that bundled OpenSSL is not a validated FIPS
+module, so the self-test **aborts the process** the moment `torch` is imported
+on a FIPS host. The model-download step (`docling-tools models download`) imports
+torch, so the build cannot complete without neutralizing that check.
+
+**The mechanism (build-time only):**
+
+- `.gitlab-ci.yml` `.buildx_fips_bypass` creates a `docker buildx` builder
+  (docker-container driver) whose `buildkitd.toml` enables
+  `insecure-entitlements = ["security.insecure"]`. `build-image` /
+  `build-sbom-image` run `docker buildx build --allow security.insecure`.
+- In `Containerfile`, the model-download layer runs as `USER 0` under
+  `RUN --security=insecure` (which grants `CAP_SYS_ADMIN`), writes `0` to
+  `/tmp/fips_zero`, and `mount --bind`s that file over
+  `/proc/sys/crypto/fips_enabled`. torch then reads FIPS as disabled and skips
+  the self-test, the models + tokenizer bake, and the bind-mount disappears with
+  the build container.
+
+**Scope & residual risk:**
+
+- **Build-time only.** The override exists only inside the model-download
+  `RUN` layer during image build. Nothing in the bind-mount, the
+  `security.insecure` entitlement, or the `USER 0` step persists into the
+  runtime image (which runs `USER 1001`). The shipped container never alters
+  `/proc/sys/crypto/fips_enabled`.
+- **Residual risk:** `security.insecure` grants the build step elevated
+  capabilities (`CAP_SYS_ADMIN`) on the builder host, so the builder must be a
+  trusted runner. The override masks the *host* FIPS flag for that one layer; it
+  does not make PyTorch's bundled OpenSSL FIPS-validated. Runtime cryptography is
+  governed by the runtime base image / system OpenSSL, not this build hack. The
+  bypass is enumerated here and in the constitution (Article V.4) so it is
+  auditable rather than incidental.
+
 ## Notes on upstream contribution
 
 If distributed post-processing beyond what plugins/serializers cover is ever

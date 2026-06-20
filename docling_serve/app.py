@@ -1109,6 +1109,128 @@ def create_app():  # noqa: C901
                 tmp_path.unlink(missing_ok=True)
         return {"filename": name, "markdown": markdown, "tables": tables, "schema": schema}
 
+    # XFA / AF form — Adobe LiveCycle "dynamic" PDFs (AF IMT, DoD e-Publishing) hide
+    # the real form in XML packets docling's PDF/OCR pipeline can't see, so this reads
+    # the XFA packets directly (pikepdf) into the captify.form.v1 payload + a markdown
+    # rendering the normal chunk/index/graph path can consume.
+    @app.post(
+        "/v1/extract/form",
+        tags=["extract"],
+        summary="Extract an XFA / Air Force dynamic PDF form (captify.form.v1)",
+    )
+    async def extract_form_route(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        files: list[UploadFile],
+        prefix: Annotated[str, Form()] = "",
+        bucket: Annotated[str, Form()] = "",
+    ):
+        """Extract an uploaded XFA / Air Force dynamic PDF form (Adobe LiveCycle, e.g.
+        AF IMT / AFMC e-Publishing forms) into the ``captify.form.v1`` payload: one
+        section unit per form section, the flat ``fields`` catalog (each with its
+        xfaPath, caption, bound value, options and absolute-mm bbox), plus a markdown
+        rendering so the form chunks/indexes/graphs like any other document. ``422``
+        when the PDF carries no XFA form.
+
+        When ``prefix`` (+ optional ``bucket``) is given, the bundle —
+        ``extraction.json`` (``domain == "form"``) + ``form.json`` + ``form.md`` +
+        ``xfa-fields.json`` + the raw ``xfa-template.xml`` / ``xfa-datasets.xml``
+        sidecars — is published to ``s3://{bucket}/{prefix}/`` for the ingestion
+        projections + the form registrar; otherwise the payload is returned inline.
+        """
+        import json as _json
+        import shutil as _shutil
+        import tempfile
+        from pathlib import Path as _Path
+
+        from docling_serve.form import (
+            XfaToolsUnavailableError,
+            extract_xfa_form,
+            is_xfa_pdf,
+            read_xfa_packets,
+        )
+        from docling_serve.schematic.extract import publish_dir_to_s3
+
+        if not files:
+            raise HTTPException(status_code=422, detail="No file uploaded.")
+        upload = files[0]
+        name = upload.filename or "form.pdf"
+        if not name.lower().endswith(".pdf"):
+            raise HTTPException(status_code=422, detail="extract/form expects a .pdf file.")
+        data = await upload.read()
+        work = _Path(tempfile.mkdtemp(prefix="xfa-form-"))
+        try:
+            src = work / name
+            src.write_bytes(data)
+            try:
+                if not is_xfa_pdf(src):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="This PDF carries no XFA form (not an AF/LiveCycle dynamic form).",
+                    )
+                payload = extract_xfa_form(src, source_key=name)
+                packets = read_xfa_packets(src)
+            except XfaToolsUnavailableError as err:
+                raise HTTPException(status_code=503, detail=str(err)) from err
+
+            target_bucket = (
+                bucket or docling_serve_settings.artifact_storage_bucket or ""
+            ).strip()
+            published: list[str] = []
+            if prefix and target_bucket:
+                bundle = work / "bundle"
+                bundle.mkdir(parents=True, exist_ok=True)
+                (bundle / "form.json").write_text(
+                    _json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                (bundle / "form.md").write_text(payload.get("markdown") or "", encoding="utf-8")
+                (bundle / "xfa-fields.json").write_text(
+                    _json.dumps(
+                        {
+                            "source": name,
+                            "fieldCount": payload.get("fieldCount"),
+                            "labelCount": payload.get("labelCount"),
+                            "boundValueCount": payload.get("boundValueCount"),
+                            "fields": payload.get("fields") or [],
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                for packet_name in ("template", "datasets"):
+                    raw = packets.get(packet_name)
+                    if raw:
+                        (bundle / f"xfa-{packet_name}.xml").write_bytes(raw)
+                (bundle / "extraction.json").write_text(
+                    _json.dumps(
+                        {
+                            "domain": "form",
+                            "form": {
+                                "format": "xfa",
+                                "payload": "form.json",
+                                "markdown": "form.md",
+                                "fieldCatalog": "xfa-fields.json",
+                                "template": "xfa-template.xml",
+                                "datasets": "xfa-datasets.xml" if payload.get("hasDatasets") else None,
+                            },
+                            "fieldCount": payload.get("fieldCount"),
+                            "sections": payload.get("sections"),
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                published = publish_dir_to_s3(bundle, bucket=target_bucket, prefix=prefix)
+            return {
+                **payload,
+                "s3Keys": published,
+                "bucket": target_bucket if published else None,
+                "prefix": prefix if published else None,
+            }
+        finally:
+            _shutil.rmtree(work, ignore_errors=True)
+
     # Technical Order (IPB/RPSTL) — the master parts list is a layout-aligned table
     # docling's reading-order export doesn't preserve, so this runs the deterministic
     # poppler-layout + MPL parser as an added pass and returns the captify.bom.v1 payload.

@@ -14,14 +14,16 @@ from docling_serve.settings import docling_serve_settings
 
 @pytest.fixture(scope="session")
 def event_loop():
-    return asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
 
 
 @pytest.fixture(scope="session")
 def auth_headers():
     headers = {}
     if docling_serve_settings.api_key:
-        headers["X-Api-Key"] = docling_serve_settings.api_key
+        headers["X-Api-Key"] = docling_serve_settings.api_key.get_secret_value()
     return headers
 
 

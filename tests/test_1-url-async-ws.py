@@ -14,7 +14,7 @@ from docling_serve.settings import docling_serve_settings
 async def async_client():
     headers = {}
     if docling_serve_settings.api_key:
-        headers["X-Api-Key"] = docling_serve_settings.api_key
+        headers["X-Api-Key"] = docling_serve_settings.api_key.get_secret_value()
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
         yield client
 
@@ -24,7 +24,7 @@ async def test_convert_url(async_client: httpx.AsyncClient):
     """Test convert URL to all outputs"""
     headers = {}
     if docling_serve_settings.api_key:
-        headers["X-Api-Key"] = docling_serve_settings.api_key
+        headers["X-Api-Key"] = docling_serve_settings.api_key.get_secret_value()
 
     doc_filename = Path("tests/2408.09869v5.pdf")
     encoded_doc = base64.b64encode(doc_filename.read_bytes()).decode()
@@ -81,8 +81,12 @@ async def test_convert_url(async_client: httpx.AsyncClient):
 
     task = response.json()
 
-    uri = f"ws://localhost:5001/v1/status/ws/{task['task_id']}?api_key={docling_serve_settings.api_key}"
-    with connect(uri) as websocket:
+    # Auth is via the X-Api-Key header (the ?api_key= query param was removed).
+    uri = f"ws://localhost:5001/v1/status/ws/{task['task_id']}"
+    ws_headers = {}
+    if docling_serve_settings.api_key:
+        ws_headers["X-Api-Key"] = docling_serve_settings.api_key.get_secret_value()
+    with connect(uri, additional_headers=ws_headers) as websocket:
         for message in websocket:
             print(message)
             payload = json.loads(message)

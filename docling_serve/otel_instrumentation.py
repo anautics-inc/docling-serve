@@ -31,7 +31,7 @@ class HealthMetricsFilterSampler(Sampler):
     """
     Sampler that filters out traces for health and metrics endpoints.
 
-    Drops spans for /metrics, /health, /healthz, /readyz, /livez regardless
+    Drops spans for /metrics, /health, /healthz, /ready, /readyz, /livez regardless
     of query parameters. All other endpoints are sampled normally (always on).
     """
 

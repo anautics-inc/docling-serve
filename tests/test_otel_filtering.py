@@ -29,6 +29,7 @@ class TestHealthMetricsFilterSampler:
             "/metrics",
             "/health",
             "/healthz",
+            "/ready",
             "/readyz",
             "/livez",
         ],
@@ -56,6 +57,7 @@ class TestHealthMetricsFilterSampler:
             "/metrics?verbose=true",
             "/health?check=all",
             "/healthz?detailed=1",
+            "/ready?wait=5",
             "/readyz?wait=5",
             "/livez?format=json",
         ],
@@ -140,7 +142,14 @@ class TestHealthMetricsFilterSampler:
 
     def test_filtered_paths_constant(self):
         """Test that FILTERED_PATHS contains expected endpoints."""
-        expected_paths = {"/metrics", "/health", "/healthz", "/readyz", "/livez"}
+        expected_paths = {
+            "/metrics",
+            "/health",
+            "/healthz",
+            "/ready",
+            "/readyz",
+            "/livez",
+        }
         assert FILTERED_PATHS == expected_paths
 
 
@@ -187,6 +196,7 @@ class TestExcludedUrlsIntegration:
             ("/health", True),
             ("/metrics", True),
             ("/healthz", True),
+            ("/ready", True),
             ("/readyz", True),
             ("/livez", True),
             ("/v1/convert", False),

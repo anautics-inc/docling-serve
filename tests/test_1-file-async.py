@@ -13,7 +13,7 @@ from docling_serve.settings import docling_serve_settings
 async def async_client():
     headers = {}
     if docling_serve_settings.api_key:
-        headers["X-Api-Key"] = docling_serve_settings.api_key
+        headers["X-Api-Key"] = docling_serve_settings.api_key.get_secret_value()
     async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
         yield client
 

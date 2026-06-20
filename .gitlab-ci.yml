@@ -208,7 +208,24 @@ unit-tests:
     # Settings fail closed when no API key is configured; CI runs unauthenticated.
     DOCLING_SERVE_ALLOW_UNAUTHENTICATED: "true"
   script:
-    - uv run pytest tests/ -x -q --tb=short
+    # Fast, deterministic, model-free unit tests only. The live-server
+    # integration suites (test_1-*/test_2-*) are conftest-ignored unless
+    # DOCLING_SERVE_RUN_INTEGRATION=1, and the in-process model-conversion
+    # suites (test_file_opts, test_results_clear, the convert cases in
+    # test_fastapi_endpoints) need baked ML models + minutes of runtime, so
+    # they are not part of the unit gate.
+    - >-
+      uv run pytest -x -q --tb=short
+      tests/test_service_policy.py
+      tests/test_config_file_loading.py
+      tests/test_health_probes.py
+      tests/test_otel_filtering.py
+      tests/test_auth.py
+      tests/test_graph_extraction.py
+      tests/test_env_parsing.py
+      tests/test_error_message_propagation.py
+      tests/test_failure_ttl.py
+      tests/test_allow_custom_config_settings.py
   tags:
     - al2023-fips-shell
   rules:

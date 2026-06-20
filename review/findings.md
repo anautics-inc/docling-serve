@@ -94,3 +94,24 @@ no longer crash), R5 sanitizes tenant ids for all endpoints, R1 is header-only, 
 `hmac.compare_digest`, R2 sets `LITELLM_LOCAL_MODEL_COST_MAP` before the lazy docling_graph
 import (+ Containerfile), R3 uses a bounded shared executor. Same 2 pre-existing unrelated
 failures remain. **Verdict: PASS — cleared to commit.**
+
+## Round 3 — pre-existing flake fix (+ regressions caught while verifying)
+
+- **Otel flake (the noted item):** `/ready` is a real registered health endpoint, so
+  `FILTERED_PATHS` correctly includes it — the *test* was stale. Updated
+  `test_otel_filtering.py` to include `/ready` (constant + drop + exclude-match
+  cases) and corrected the source docstrings. FIXED.
+- **event_loop teardown error:** traced to `test_health_probes`' deprecated
+  session-scoped `event_loop` fixture; migrated it to the pytest-asyncio
+  `loop_scope="session"` pattern (other files' fixtures hardened to yield/close).
+  Teardown error gone.
+- **Regression caught (F2 fallout):** 11 integration-test `auth_headers` fixtures
+  passed the now-`SecretStr` `api_key` straight into a header
+  (`TypeError: Header value must be str`). Fixed with `.get_secret_value()`.
+- **Regression caught (R1 fallout):** the websocket integration test used the
+  removed `?api_key=` query param; switched to the `X-Api-Key` header.
+- **CI scope:** the newly-enabled `unit-tests` job ran the whole `tests/` tree,
+  which pulled in slow in-process model-conversion suites (timeout) and
+  live-server suites (no server). Scoped the job to the fast deterministic unit
+  set; live-server `test_1-*/test_2-*` are conftest-ignored unless
+  `DOCLING_SERVE_RUN_INTEGRATION=1`.

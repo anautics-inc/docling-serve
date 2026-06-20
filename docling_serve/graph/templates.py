@@ -19,13 +19,31 @@ one whenever the document type is known.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import ClassVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class GraphModelConfig(ConfigDict, total=False):
+    """Pydantic ``model_config`` extended with docling-graph metadata keys.
+
+    ``is_entity`` marks a model as a graph node and ``graph_id_fields`` names the
+    fields that form its stable identity. Declaring them on a ``ConfigDict``
+    subclass keeps the extra keys type-checked instead of tripping mypy's
+    ``typeddict-unknown-key`` on the bare ``ConfigDict``.
+    """
+
+    is_entity: bool
+    graph_id_fields: list[str]
 
 
 class Entity(BaseModel):
     """A salient entity mentioned in the document."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(description="Canonical name of the entity, exactly as written")
     type: str = Field(
@@ -49,7 +67,10 @@ class Entity(BaseModel):
 class Relation(BaseModel):
     """A named relationship that connects two or more entities."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(
         description=(
@@ -72,7 +93,10 @@ class Relation(BaseModel):
 class DocumentGraph(BaseModel):
     """Generic knowledge graph for an arbitrary document."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["title"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["title"],
+    }
 
     title: str = Field(description="Document title or best available identifier")
     entities: list[Entity] = Field(
@@ -98,7 +122,10 @@ class DocumentGraph(BaseModel):
 class SchematicComponent(BaseModel):
     """A component referenced in schematic/wiring documentation text."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(
         description="Reference designator when printed (R1, K1, J4, TB2) else the "
@@ -116,7 +143,10 @@ class SchematicComponent(BaseModel):
 class SchematicConnection(BaseModel):
     """A named electrical/physical connection grouping components."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(
         description="Net/signal/line label from the document (GND, +28V, SIG_A, "
@@ -138,7 +168,10 @@ class SchematicDocumentGraph(BaseModel):
     so both land compatibly in the ontology.
     """
 
-    model_config = {"is_entity": True, "graph_id_fields": ["title"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["title"],
+    }
 
     title: str = Field(description="Drawing/document title or number")
     components: list[SchematicComponent] = Field(
@@ -154,7 +187,10 @@ class SchematicDocumentGraph(BaseModel):
 class DatabaseTable(BaseModel):
     """A table in an exported database (e.g. Access)."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(description="Table name exactly as exported")
     type: str = Field(default="DatabaseTable", description="Always DatabaseTable")
@@ -167,7 +203,10 @@ class DatabaseTable(BaseModel):
 class TableRelationship(BaseModel):
     """A relationship between tables (shared key columns, lookups, foreign keys)."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(
         description="Predicate in SCREAMING_SNAKE_CASE, e.g. REFERENCES, LOOKS_UP, "
@@ -186,7 +225,10 @@ class AccessDatabaseGraph(BaseModel):
     lives where and how tables join.
     """
 
-    model_config = {"is_entity": True, "graph_id_fields": ["title"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["title"],
+    }
 
     title: str = Field(description="Database file name or title")
     tables: list[DatabaseTable] = Field(
@@ -208,7 +250,10 @@ class SustainmentEntity(BaseModel):
     the ontology instead of queued as proposed.
     """
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(description="Canonical name exactly as written")
     type: str = Field(
@@ -240,7 +285,10 @@ class SustainmentEntity(BaseModel):
 class SustainmentRelation(BaseModel):
     """A relationship from the sustainment edge catalog."""
 
-    model_config = {"is_entity": True, "graph_id_fields": ["name"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["name"],
+    }
 
     name: str = Field(
         description=(
@@ -270,7 +318,10 @@ class UsafSustainmentGraph(BaseModel):
     change-initiating events connecting them.
     """
 
-    model_config = {"is_entity": True, "graph_id_fields": ["title"]}
+    model_config: ClassVar[GraphModelConfig] = {
+        "is_entity": True,
+        "graph_id_fields": ["title"],
+    }
 
     title: str = Field(description="Document title or best available identifier")
     entities: list[SustainmentEntity] = Field(

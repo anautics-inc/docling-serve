@@ -8,11 +8,16 @@ from pydantic import BaseModel, Field
 class GraphExtractRequest(BaseModel):
     """Request body for ``POST /v1/graph/extract``."""
 
-    text: str = Field(description="Converted document text/markdown to extract a graph from")
+    text: str = Field(
+        ...,
+        max_length=5_000_000,
+        description="Converted document text/markdown to extract a graph from",
+    )
     template: str | None = Field(
         default=None,
-        description="Dotted import path to a docling-graph Pydantic template; "
-        "empty uses the configured default (generic entity/relation graph).",
+        description="Must match a server allow-listed template/profile (see "
+        "PROFILE_TEMPLATES); empty uses the configured default (generic "
+        "entity/relation graph).",
     )
     profile: str | None = Field(
         default=None,

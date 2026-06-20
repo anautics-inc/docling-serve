@@ -24,9 +24,12 @@ import importlib
 import importlib.util
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pydantic import SecretStr
 
 from docling_serve.graph.templates import PROFILE_TEMPLATES, resolve_profile_template
 from docling_serve.settings import docling_serve_settings
@@ -50,7 +53,7 @@ class GraphExtractionUnavailable(RuntimeError):
 @dataclass(slots=True)
 class _GraphConfig:
     base_url: str
-    api_key: str
+    api_key: SecretStr
     model: str
     provider: str
     template: str
@@ -59,6 +62,7 @@ class _GraphConfig:
     max_chars: int
     max_output_tokens: int
     context_limit: int
+    timeout_s: float
 
 
 def docling_graph_installed() -> bool:
@@ -75,31 +79,31 @@ def build_graph_config(template_override: str | None = None) -> _GraphConfig | N
     different proxy/model than the rest of the service.
     """
     s = docling_serve_settings
-    base_url = (
-        getattr(s, "graph_litellm_base_url", None) or getattr(s, "litellm_base_url", None)
-    )
-    api_key = getattr(s, "graph_litellm_api_key", None) or getattr(s, "litellm_api_key", None)
-    if not base_url or not api_key:
+    base_url = s.graph_litellm_base_url or s.litellm_base_url
+    api_key = s.graph_litellm_api_key or s.litellm_api_key
+    if not base_url or api_key is None or not api_key.get_secret_value():
         return None
-    template = (
-        template_override or getattr(s, "graph_extraction_template", None) or _DEFAULT_TEMPLATE
-    )
+    template = template_override or s.graph_extraction_template or _DEFAULT_TEMPLATE
     return _GraphConfig(
-        base_url=str(base_url),
-        api_key=str(api_key),
-        model=getattr(s, "graph_litellm_model", "bedrock-claude-sonnet-4-6"),
-        provider=getattr(s, "graph_litellm_provider", "litellm_proxy"),
+        base_url=base_url,
+        api_key=api_key,
+        model=s.graph_litellm_model,
+        provider=s.graph_litellm_provider,
         template=template,
-        contract=getattr(s, "graph_extraction_contract", "direct"),
-        structured_output=bool(getattr(s, "graph_extraction_structured_output", False)),
-        max_chars=int(getattr(s, "graph_extraction_max_chars", 200_000)),
-        max_output_tokens=int(getattr(s, "graph_extraction_max_output_tokens", 32_000)),
-        context_limit=int(getattr(s, "graph_extraction_context_limit", 200_000)),
+        contract=s.graph_extraction_contract,
+        structured_output=s.graph_extraction_structured_output,
+        max_chars=s.graph_extraction_max_chars,
+        max_output_tokens=s.graph_extraction_max_output_tokens,
+        context_limit=s.graph_extraction_context_limit,
+        timeout_s=s.graph_extraction_timeout_s,
     )
 
 
 def run_graph_extraction(
-    source_path: Path, cfg: _GraphConfig, *, identity_headers: dict[str, str] | None = None
+    source_path: Path,
+    cfg: _GraphConfig,
+    *,
+    identity_headers: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Run docling-graph through LiteLLM; return ``(networkx graph, model count)``.
 
@@ -110,7 +114,6 @@ def run_graph_extraction(
     try:
         dg = importlib.import_module("docling_graph")
         dg_cfg = importlib.import_module("docling_graph.llm_clients.config")
-        from pydantic import SecretStr
     except Exception as err:  # pragma: no cover - import guard
         raise GraphExtractionUnavailable("docling_graph_import_failed") from err
 
@@ -136,7 +139,7 @@ def run_graph_extraction(
         llm_overrides=dg_cfg.LlmRuntimeOverrides(
             connection=dg_cfg.ConnectionOverrides(
                 base_url=cfg.base_url,
-                api_key=SecretStr(cfg.api_key),
+                api_key=cfg.api_key,
                 headers=request_headers,
             ),
             # docling-graph cannot resolve token limits through a proxy alias and
@@ -148,10 +151,23 @@ def run_graph_extraction(
         ),
     )
 
+    # docling-graph's ConnectionOverrides exposes no request timeout, so bound the
+    # blocking run with a wall-clock ceiling here: run it on a worker thread and
+    # stop waiting after cfg.timeout_s. shutdown(wait=False) means the orphaned
+    # thread may keep running in the background, but the caller is no longer
+    # hostage to a stuck proxy call.
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        ctx = dg.run_pipeline(pipeline_config.to_dict())
+        future = pool.submit(dg.run_pipeline, pipeline_config.to_dict())
+        ctx = future.result(timeout=cfg.timeout_s)
+    except FuturesTimeoutError as err:
+        raise GraphExtractionUnavailable("graph_run_timeout") from err
     except Exception as err:
-        raise GraphExtractionUnavailable(f"graph_run_failed: {type(err).__name__}") from err
+        raise GraphExtractionUnavailable(
+            f"graph_run_failed: {type(err).__name__}"
+        ) from err
+    finally:
+        pool.shutdown(wait=False)
 
     graph = getattr(ctx, "knowledge_graph", None)
     if graph is None:
@@ -161,7 +177,10 @@ def run_graph_extraction(
 
 
 def graph_payload_from_text(
-    text: str, *, template: str | None = None, identity_headers: dict[str, str] | None = None
+    text: str,
+    *,
+    template: str | None = None,
+    identity_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Extract a knowledge graph from raw markdown/text (stateless entry point).
 
@@ -214,7 +233,7 @@ def _allowed_templates() -> set[str]:
     """
     allowed = set(PROFILE_TEMPLATES.values())
     allowed.add(_DEFAULT_TEMPLATE)
-    configured = getattr(docling_serve_settings, "graph_extraction_template", None)
+    configured = docling_serve_settings.graph_extraction_template
     if configured:
         allowed.add(configured)
     return allowed
@@ -231,6 +250,16 @@ def _import_template(dotted: str) -> Any:
         return getattr(module, attr)
     except (ImportError, AttributeError) as err:
         raise GraphExtractionUnavailable(f"template_not_found: {dotted}") from err
+
+
+def _is_present(value: Any) -> bool:
+    """True when a scalar attribute value is worth keeping in the payload.
+
+    ``v not in (None, "")`` raises ``TypeError`` for unhashable/array-valued
+    attributes (e.g. a list or numpy array). Only treat ``None`` and the empty
+    string as "absent"; everything else (including lists) is kept.
+    """
+    return not (value is None or (isinstance(value, str) and value.strip() == ""))
 
 
 def _graph_to_payload(graph: Any) -> dict[str, Any]:
@@ -253,7 +282,7 @@ def _graph_to_payload(graph: Any) -> dict[str, Any]:
         properties = {
             k: v
             for k, v in attrs.items()
-            if k not in {"id", "label", "type", "__class__"} and v not in (None, "")
+            if k not in {"id", "label", "type", "__class__"} and _is_present(v)
         }
         nodes.append(
             {
@@ -271,7 +300,7 @@ def _graph_to_payload(graph: Any) -> dict[str, Any]:
         edge_label = attrs.get("label")
         if edge_label:
             edge_labels[edge_label] = edge_labels.get(edge_label, 0) + 1
-        properties = {k: v for k, v in attrs.items() if k != "label" and v not in (None, "")}
+        properties = {k: v for k, v in attrs.items() if k != "label" and _is_present(v)}
         edges.append(
             {
                 "source": str(source),

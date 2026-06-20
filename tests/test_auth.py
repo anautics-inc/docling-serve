@@ -15,6 +15,7 @@ in other test modules.
 import pytest
 
 from docling_serve.auth import APIKeyAuth
+from docling_serve.settings import DoclingServeSettings
 
 
 @pytest.mark.asyncio
@@ -38,3 +39,17 @@ async def test_set_key_requires_exact_match():
 
     assert (await auth._validate_api_key("wrong")).valid is False
     assert (await auth._validate_api_key(None)).valid is False
+
+
+def test_validate_serving_auth_mode_fails_closed_without_key():
+    settings = DoclingServeSettings(api_key=None, allow_unauthenticated=False)
+
+    with pytest.raises(ValueError):
+        settings.validate_serving_auth_mode()
+
+    DoclingServeSettings(
+        api_key=None, allow_unauthenticated=True
+    ).validate_serving_auth_mode()
+    DoclingServeSettings(
+        api_key="s3cr3t", allow_unauthenticated=False
+    ).validate_serving_auth_mode()

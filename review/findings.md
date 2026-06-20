@@ -69,3 +69,28 @@ The fail-closed guard (F1/F2) means the container **refuses to boot** unless
 is set in the runtime env. The deploy `.env` MUST set one of these before rollout.
 
 **Verdict: PASS — cleared to commit.** No merge; PR only.
+
+## Round 2 — codex (real model) second-opinion review, triaged (2026-06-20)
+
+Driven via `codex exec`. All 9 accepted as FIX (user: fix every item).
+
+| ID | Sev | Decision | Action |
+|----|-----|----------|--------|
+| R1 | BLOCKER | FIX | Remove `?api_key=` from status websocket; header-only (breaking — note in PR). |
+| R2 | BLOCKER | FIX | Set `LITELLM_LOCAL_MODEL_COST_MAP=True` in Containerfile offline block AND defensively in extraction.py before importing docling_graph (stops LiteLLM GitHub cost-map fetch in air-gap). |
+| R3 | HIGH | FIX | Replace per-call ThreadPoolExecutor with a module-level bounded shared executor (capped orphan threads + backpressure). |
+| R4 | HIGH | FIX | Move fail-closed auth check out of the import-time model_validator into a `validate_serving_auth_mode()` called from `create_app()`, so non-serving imports/CLI don't crash. |
+| R5 | HIGH | FIX | Centralize tenant_id charset validation in `_get_tenant_id_from_header()` (drop invalid -> "default") so convert/chunk metadata is also sanitized, not just the graph path. |
+| R6 | MEDIUM | FIX | If `DOCLING_SERVE_CONFIG_FILE` is set but missing, raise FileNotFoundError (keep unset -> {}). |
+| R7 | MEDIUM | FIX | Use `hmac.compare_digest` for configured-key comparison (auth.py + websocket). |
+| R8 | MEDIUM | FIX | Add a startup test asserting create_app() fails closed with no key and passes with the opt-in/key. |
+| R9 | LOW | FIX | `.env.example`: the "run without auth" example must be `=true` (was wrongly `=false`). |
+
+### Round 2 — manager adversarial review of codex's build (PASS)
+Independently verified: ruff format/check + mypy clean; 19 directly-affected tests pass
+incl. new fail-closed-startup (R8) and fail-loud-config (R6) tests. Verified R4 moved the
+auth check to a `create_app()`-invoked method (uvicorn `factory=True`, so import/CLI paths
+no longer crash), R5 sanitizes tenant ids for all endpoints, R1 is header-only, R7 uses
+`hmac.compare_digest`, R2 sets `LITELLM_LOCAL_MODEL_COST_MAP` before the lazy docling_graph
+import (+ Containerfile), R3 uses a bounded shared executor. Same 2 pre-existing unrelated
+failures remain. **Verdict: PASS — cleared to commit.**

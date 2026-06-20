@@ -247,6 +247,25 @@ class DoclingServeSettings(BaseSettings):
     # Tenant ID Header
     eng_ray_tenant_id_header: str = "X-Tenant-Id"
 
+    # === Knowledge-graph extraction (docling-graph NER; /v1/graph/extract) ===
+    # LiteLLM proxy the docling-graph extractor calls (fronts Bedrock). The graph_*
+    # values win over the shared litellm_* so graph extraction can target a different
+    # proxy/model. Unset → /v1/graph/extract returns an empty graph (note=litellm_not_configured).
+    litellm_base_url: Optional[str] = None
+    litellm_api_key: Optional[str] = None
+    graph_litellm_base_url: Optional[str] = None
+    graph_litellm_api_key: Optional[str] = None
+    graph_litellm_model: str = "bedrock-claude-sonnet-4-6"
+    graph_litellm_provider: str = "litellm_proxy"
+    # Dotted import path to a default docling-graph Pydantic template; a request's
+    # `template`/`profile` overrides this. Empty → the generic DocumentGraph.
+    graph_extraction_template: Optional[str] = None
+    graph_extraction_contract: str = "direct"
+    graph_extraction_structured_output: bool = False
+    graph_extraction_max_chars: int = 200_000
+    graph_extraction_max_output_tokens: int = 32_000
+    graph_extraction_context_limit: int = 200_000
+
     # OpenTelemetry settings
     otel_enable_metrics: bool = True
     otel_enable_traces: bool = False

@@ -89,6 +89,13 @@ from docling_jobkit.orchestrators.base_orchestrator import (
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestrator
 
 from docling_serve.auth import APIKeyAuth, AuthenticationResult
+from docling_serve.graph import (
+    GraphExtractionUnavailable,
+    GraphExtractRequest,
+    GraphExtractResponse,
+    graph_payload_from_text,
+    resolve_profile_template,
+)
 from docling_serve.helper_functions import DOCLING_VERSIONS, FormDepends
 from docling_serve.orchestrator_factory import get_async_orchestrator
 from docling_serve.otel_instrumentation import (
@@ -1119,6 +1126,34 @@ def create_app():  # noqa: C901
                 background_tasks=background_tasks,
             )
             return response
+
+    # Knowledge-graph extraction (docling-graph NER — the Comprehend replacement).
+    # Synchronous: extract a typed entity+relationship graph from already-converted
+    # text via docling-graph (LLM through the configured LiteLLM proxy) and return a
+    # node/edge payload. Returns an EMPTY graph with a `note` (not an error) when the
+    # feature is unconfigured or docling-graph is unavailable, so a caller treats
+    # "no graph" uniformly.
+    @app.post("/v1/graph/extract", tags=["graph"], response_model=GraphExtractResponse)
+    def extract_graph(
+        auth: Annotated[AuthenticationResult, Depends(require_auth)],
+        body: GraphExtractRequest,
+        x_tenant_id: Annotated[
+            str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
+        ] = None,
+    ) -> GraphExtractResponse:
+        template = body.template or resolve_profile_template(body.profile)
+        # Forward the tenant to the proxy as a spend tag (the proxy key is service-scoped,
+        # so this is how graph-extraction spend is attributed per tenant).
+        tenant_id = _get_tenant_id_from_header(x_tenant_id)
+        identity_headers = {"x-tenant-id": tenant_id} if tenant_id else None
+        try:
+            payload = graph_payload_from_text(
+                body.text, template=template, identity_headers=identity_headers
+            )
+        except GraphExtractionUnavailable as err:
+            _log.info("Graph extraction unavailable: %s", err)
+            return GraphExtractResponse(note=str(err))
+        return GraphExtractResponse(**payload)
 
     # Task status poll
     @app.get(

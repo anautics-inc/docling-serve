@@ -265,6 +265,31 @@ def parse_dataset_values(datasets_xml: bytes) -> dict[str, str]:
     return values
 
 
+def all_dataset_leaf_paths(datasets_xml: bytes) -> list[str]:
+    """Every leaf dotted-path in the datasets packet — INCLUDING empties and
+    xhtml-rich bodies. ``parse_dataset_values`` only returns non-empty leaves; the
+    form registrar needs the full set to decide which template fields are fillable
+    (a blank template has no values yet, but every fillable field still has a leaf).
+    """
+    root = _safe_fromstring(datasets_xml)
+    data = next((child for child in root if _local(child.tag) == "data"), root)
+    xhtml = "{http://www.w3.org/1999/xhtml}"
+    out: set[str] = set()
+
+    def descend(element: ET.Element, path: list[str]) -> None:
+        children = list(element)
+        rich = any(str(c.tag).startswith(xhtml) for c in children)
+        if not children or rich:
+            out.add(".".join(path))
+            return
+        for child in children:
+            descend(child, [*path, _local(child.tag)])
+
+    for child in data:
+        descend(child, [_local(child.tag)])
+    return sorted(out)
+
+
 def merge_values(fields: list[dict[str, Any]], values: dict[str, str]) -> int:
     """Bind dataset values onto fields by longest matching dotted-path suffix."""
     bound = 0
@@ -370,8 +395,10 @@ def extract_xfa_form(path: Path, *, source_key: str = "") -> dict[str, Any]:
 
     fields = parse_template_fields(template)
     bound_count = 0
+    dataset_leaf_paths: list[str] = []
     if packets.get("datasets"):
         bound_count = merge_values(fields, parse_dataset_values(packets["datasets"]))
+        dataset_leaf_paths = all_dataset_leaf_paths(packets["datasets"])
 
     field_count = sum(1 for f in fields if f["kind"] == "field")
     label_count = sum(1 for f in fields if f["kind"] == "label")
@@ -387,6 +414,9 @@ def extract_xfa_form(path: Path, *, source_key: str = "") -> dict[str, Any]:
         "boundValueCount": bound_count,
         "sections": sections,
         "fields": fields,
+        # Full set of datasets leaves (incl. empties) — which template fields the
+        # form registrar treats as fillable. Empty for a no-datasets form.
+        "datasetLeafPaths": dataset_leaf_paths,
         "units": _units(fields),
         "markdown": xfa_markdown(Path(stem).stem, fields),
         "hasDatasets": bool(packets.get("datasets")),
@@ -396,6 +426,7 @@ def extract_xfa_form(path: Path, *, source_key: str = "") -> dict[str, Any]:
 __all__ = [
     "XFA_PROFILES",
     "XfaToolsUnavailableError",
+    "all_dataset_leaf_paths",
     "extract_xfa_form",
     "is_xfa_pdf",
     "merge_values",

@@ -2,6 +2,7 @@ import asyncio
 import copy
 import gc
 import hashlib
+import hmac
 import importlib.metadata
 import logging
 import os
@@ -222,6 +223,8 @@ async def lifespan(app: FastAPI):
 
 
 def create_app():  # noqa: C901
+    docling_serve_settings.validate_serving_auth_mode()
+
     try:
         version = importlib.metadata.version("docling_serve")
     except importlib.metadata.PackageNotFoundError:
@@ -494,7 +497,15 @@ def create_app():  # noqa: C901
 
     def _get_tenant_id_from_header(tenant_id_header: str | None) -> str:
         """Extract tenant_id from header or return default."""
-        tenant_id = tenant_id_header or "default"
+        if tenant_id_header is None:
+            tenant_id = "default"
+        elif _is_valid_tenant_id(tenant_id_header):
+            tenant_id = tenant_id_header
+        else:
+            _log.debug(
+                "[TENANT_ID] Invalid tenant_id header dropped: %r", tenant_id_header
+            )
+            tenant_id = "default"
         _log.debug(f"[TENANT_ID] Extracted tenant_id from header: '{tenant_id}'")
         return tenant_id
 
@@ -1160,10 +1171,8 @@ def create_app():  # noqa: C901
         # Forward the tenant to the proxy as a spend tag (the proxy key is service-scoped,
         # so this is how graph-extraction spend is attributed per tenant).
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
-        # Only forward a tenant id that matches the safe charset; drop it
-        # otherwise so an arbitrary caller header is never relayed to the proxy.
         identity_headers = (
-            {"x-tenant-id": tenant_id} if _is_valid_tenant_id(tenant_id) else None
+            {"x-tenant-id": tenant_id} if tenant_id != "default" else None
         )
         try:
             payload = graph_payload_from_text(
@@ -1212,14 +1221,11 @@ def create_app():  # noqa: C901
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
         task_id: str,
         x_api_key: Annotated[str | None, Header(alias="X-Api-Key")] = None,
-        # The ?api_key= query param leaks the secret into URLs/logs and is
-        # deprecated in favor of the X-Api-Key header; kept one release as a fallback.
-        api_key: Annotated[str, Query()] = "",
     ):
         configured = docling_serve_settings.api_key
         if configured:
-            provided = x_api_key or api_key
-            if provided != configured.get_secret_value():
+            provided = x_api_key or ""
+            if not hmac.compare_digest(provided, configured.get_secret_value()):
                 # Starlette cannot return a clean 401 during the WS handshake, so
                 # close with policy-violation (1008) instead of raising.
                 await websocket.close(code=1008)

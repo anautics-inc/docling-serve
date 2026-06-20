@@ -1,3 +1,4 @@
+import hmac
 from typing import Any
 
 from fastapi import HTTPException, Request, status
@@ -35,7 +36,7 @@ class APIKeyAuth(APIKeyHeader):
         header_api_key = header_api_key.strip()
 
         # Otherwise check the apikey
-        if header_api_key == self.api_key or self.api_key == "":
+        if hmac.compare_digest(header_api_key, self.api_key) or self.api_key == "":
             return AuthenticationResult(
                 valid=True,
                 detail=header_api_key,

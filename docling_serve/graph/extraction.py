@@ -23,6 +23,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import logging
+import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from docling_serve.settings import docling_serve_settings
 _log = logging.getLogger(__name__)
 
 _DEFAULT_TEMPLATE = "docling_serve.graph.templates.DocumentGraph"
+_GRAPH_EXECUTOR: ThreadPoolExecutor | None = None
 
 __all__ = [
     "GraphExtractionUnavailable",
@@ -63,6 +65,15 @@ class _GraphConfig:
     max_output_tokens: int
     context_limit: int
     timeout_s: float
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _GRAPH_EXECUTOR
+    if _GRAPH_EXECUTOR is None:
+        _GRAPH_EXECUTOR = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="graph-extract"
+        )
+    return _GRAPH_EXECUTOR
 
 
 def docling_graph_installed() -> bool:
@@ -112,6 +123,9 @@ def run_graph_extraction(
     headers are how graph-extraction usage is isolated per tenant in spend logs).
     """
     try:
+        # LiteLLM otherwise tries to fetch its model cost map from GitHub at import
+        # time; keep graph extraction runnable in an air-gapped runtime.
+        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
         dg = importlib.import_module("docling_graph")
         dg_cfg = importlib.import_module("docling_graph.llm_clients.config")
     except Exception as err:  # pragma: no cover - import guard
@@ -152,11 +166,10 @@ def run_graph_extraction(
     )
 
     # docling-graph's ConnectionOverrides exposes no request timeout, so bound the
-    # blocking run with a wall-clock ceiling here: run it on a worker thread and
-    # stop waiting after cfg.timeout_s. shutdown(wait=False) means the orphaned
-    # thread may keep running in the background, but the caller is no longer
-    # hostage to a stuck proxy call.
-    pool = ThreadPoolExecutor(max_workers=1)
+    # blocking run with a wall-clock ceiling here. Timed-out work may continue in
+    # the background, but the shared bounded pool caps orphaned in-flight runs and
+    # back-pressures later submissions instead of spawning one thread per request.
+    pool = _get_executor()
     try:
         future = pool.submit(dg.run_pipeline, pipeline_config.to_dict())
         ctx = future.result(timeout=cfg.timeout_s)
@@ -166,8 +179,6 @@ def run_graph_extraction(
         raise GraphExtractionUnavailable(
             f"graph_run_failed: {type(err).__name__}"
         ) from err
-    finally:
-        pool.shutdown(wait=False)
 
     graph = getattr(ctx, "knowledge_graph", None)
     if graph is None:

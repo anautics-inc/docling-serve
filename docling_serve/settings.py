@@ -67,7 +67,7 @@ class YamlConfigSettingsSource(PydanticBaseSettingsSource):
 
         config_path = Path(config_path_str)
         if not config_path.exists():
-            return {}
+            raise FileNotFoundError(config_path)
 
         try:
             with open(config_path) as f:
@@ -464,14 +464,13 @@ class DoclingServeSettings(BaseSettings):
 
         return self
 
-    @model_validator(mode="after")
-    def require_api_key_or_explicit_opt_in(self) -> Self:
+    def validate_serving_auth_mode(self) -> None:
         """Fail closed when auth would be silently disabled.
 
         An empty ``api_key`` makes the ``X-Api-Key`` check pass for everyone
-        (upstream behavior). Refuse to start in that state unless the operator
-        explicitly opts into unauthenticated mode, so a missing key cannot ship
-        an unprotected service by accident (Article VI.1 / N5).
+        (upstream behavior). Refuse to start the serving app in that state unless
+        the operator explicitly opts into unauthenticated mode, so a missing key
+        cannot ship an unprotected service by accident (Article VI.1 / N5).
         """
         if (
             self.api_key is None or self.api_key.get_secret_value() == ""
@@ -482,7 +481,6 @@ class DoclingServeSettings(BaseSettings):
                 "opt into unauthenticated mode with "
                 "DOCLING_SERVE_ALLOW_UNAUTHENTICATED=true."
             )
-        return self
 
 
 uvicorn_settings = UvicornSettings()

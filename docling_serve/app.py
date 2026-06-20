@@ -1019,7 +1019,12 @@ def create_app():  # noqa: C901
     # {nodes, edges, labels, edgeLabels, nodeCount, edgeCount, ...}; an empty graph
     # plus a `note` when graph extraction is unconfigured/unavailable, so callers
     # (pytology) degrade uniformly instead of erroring.
-    @app.post("/v1/graph/extract", tags=["graph"], response_model=GraphExtractResponse)
+    @app.post(
+        "/v1/graph/extract",
+        tags=["graph"],
+        response_model=GraphExtractResponse,
+        summary="Extract a knowledge graph (entities + relations) from converted text",
+    )
     def extract_graph(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         body: GraphExtractRequest,
@@ -1027,6 +1032,15 @@ def create_app():  # noqa: C901
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ) -> GraphExtractResponse:
+        """Run docling-graph entity/relation extraction over already-converted text
+        (the NER replacement) — conversion itself is docling's OOTB job.
+
+        Body: ``{text, template?, profile?}`` (``profile`` selects a built-in
+        template, e.g. ``schematic``/``access``; ``template`` is a dotted import
+        path). Returns ``{nodes, edges, labels, edgeLabels, nodeCount, edgeCount}``,
+        or an empty graph + a ``note`` when extraction is unconfigured so callers
+        degrade uniformly.
+        """
         template = body.template or resolve_profile_template(body.profile)
         # Forward the tenant to the proxy as a spend tag (the proxy key is
         # service-scoped, so this is how graph-extraction spend is attributed).
@@ -1044,11 +1058,22 @@ def create_app():  # noqa: C901
     # Microsoft Access (.mdb/.accdb) — docling has no Access backend, so this gap is
     # filled by converting the database to docling-native markdown tables (access-parser),
     # which chunking + graph extraction then consume out of the box.
-    @app.post("/v1/extract/access", tags=["extract"])
+    @app.post(
+        "/v1/extract/access",
+        tags=["extract"],
+        summary="Convert a Microsoft Access database to docling-native markdown tables",
+    )
     async def extract_access(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         files: list[UploadFile],
     ):
+        """Convert an uploaded Access database (.mdb/.accdb) into docling-native
+        GitHub-flavored markdown — one section + table per Access table — using the
+        pure-Python access-parser (no ODBC/mdbtools).
+
+        Returns ``{filename, markdown, tables: [{name, columns, rows}], schema}``;
+        ``422`` if the upload is not an Access file.
+        """
         import tempfile
         from pathlib import Path as _Path
 
@@ -1087,13 +1112,29 @@ def create_app():  # noqa: C901
     # Technical Order (IPB/RPSTL) — the master parts list is a layout-aligned table
     # docling's reading-order export doesn't preserve, so this runs the deterministic
     # poppler-layout + MPL parser as an added pass and returns the captify.bom.v1 payload.
-    @app.post("/v1/extract/technical-order", tags=["extract"])
+    @app.post(
+        "/v1/extract/technical-order",
+        tags=["extract"],
+        summary="Extract an IPB/RPSTL technical order's parts list (captify.bom.v1)",
+    )
     async def extract_technical_order_route(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         files: list[UploadFile],
         prefix: Annotated[str, Form()] = "",
         bucket: Annotated[str, Form()] = "",
     ):
+        """Parse an uploaded IPB/RPSTL technical-order PDF into the ``captify.bom.v1``
+        parts payload: every part with figure & index, part number, CAGE/FSCM, NSN,
+        SMR code, description, quantity and indenture, plus the figure records
+        (number, title, page, rendered drawing, callout↔part hotspots). Born-digital
+        TOs use the deterministic poppler+MPL/RPSTL parser; scanned/dirty-OCR TOs use
+        a vision (Sonnet 4.5) parts-table + page-classifier pass.
+
+        When ``prefix`` (+ optional ``bucket``) is given, the bundle —
+        ``extraction.json`` (``domain == "technical-order"``) + ``bom.json`` +
+        ``media/`` figures — is published to ``s3://{bucket}/{prefix}/`` for the
+        ingestion projections; otherwise the payload is returned inline.
+        """
         import json as _json
         import shutil as _shutil
         import tempfile
@@ -1183,7 +1224,11 @@ def create_app():  # noqa: C901
     # Schematic (engineering drawing) extraction — the wiring GEOMETRY docling can't
     # recover (component symbols + the nets connecting their pins) is produced here as
     # a captify.schematic.v1 graph + derived artifacts (SVG, KiCad, netlist, EDML, XML).
-    @app.post("/v1/extract/schematic", tags=["extract"])
+    @app.post(
+        "/v1/extract/schematic",
+        tags=["extract"],
+        summary="Extract an engineering drawing into a captify.schematic.v1 graph",
+    )
     async def extract_schematic_route(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         files: list[UploadFile],
@@ -1194,6 +1239,17 @@ def create_app():  # noqa: C901
             str | None, Header(alias=docling_serve_settings.eng_ray_tenant_id_header)
         ] = None,
     ):
+        """Derive the wiring GEOMETRY docling can't recover from an engineering
+        drawing — every component symbol (refDes, type, value) and the nets
+        connecting their pins — as a ``captify.schematic.v1`` graph plus the derived
+        CAD artifacts (SVG, KiCad, netlist, EDML, KBL, SPICE). Vision (Bedrock) +
+        geometry; ``profile="schematic"`` forces the drawing extractor.
+
+        When ``prefix`` (+ optional ``bucket``) is given, the bundle —
+        ``extraction.json`` (``domain == "schematic"``) + ``schematic/`` — is
+        published to ``s3://{bucket}/{prefix}/`` for the schematic digital-twin
+        check/revise/simulate endpoints; otherwise returned inline.
+        """
         import shutil as _shutil
         import tempfile
         from pathlib import Path as _Path
@@ -1240,11 +1296,21 @@ def create_app():  # noqa: C901
 
     # CAD-style delivery check for a published schematic bundle (graph integrity,
     # KiCad open/ERC, netlist, KBL XSD, XML, ngspice). Body: {prefix, bucket?}.
-    @app.post("/v1/schematic/check", tags=["schematic"])
+    @app.post(
+        "/v1/schematic/check",
+        tags=["schematic"],
+        summary="Run the CAD delivery checks on a published schematic bundle",
+    )
     async def schematic_check(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         body: dict,
     ):
+        """Run the CAD-style delivery checks (graph integrity, KiCad open/ERC,
+        netlist, KBL XSD, XML, ngspice elaboration) on a published schematic bundle.
+
+        Body: ``{prefix, bucket?}``. Returns ``{checks: [{name, status, detail}],
+        passed}``; ``404`` when the bundle is missing.
+        """
         from docling_serve.schematic.schematic_revision import check_schematic_bundle
 
         prefix = str(body.get("prefix") or "").strip()
@@ -1265,11 +1331,23 @@ def create_app():  # noqa: C901
 
     # Apply browser edits to a schematic bundle and regenerate every derived artifact,
     # republish, and return the post-edit delivery check. Body: {prefix, bucket?, edits}.
-    @app.post("/v1/schematic/revise", tags=["schematic"])
+    @app.post(
+        "/v1/schematic/revise",
+        tags=["schematic"],
+        summary="Apply edits to a schematic bundle and regenerate every artifact",
+    )
     async def schematic_revise(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         body: dict,
     ):
+        """Apply component/net edits to a published schematic bundle, regenerate
+        every derived artifact (KiCad, netlist, KBL, SPICE, XML, EDML), republish,
+        and re-run the delivery checks.
+
+        Body: ``{prefix, bucket?, edits: {components, nets}}`` (components/nets are
+        addressed by graph id; ``delete: true`` drops a false detection). Returns
+        ``{checks, passed, applied, notes}``; ``404`` when the bundle is missing.
+        """
         from docling_serve.schematic.schematic_revision import revise_schematic_bundle
 
         prefix = str(body.get("prefix") or "").strip()
@@ -1292,11 +1370,22 @@ def create_app():  # noqa: C901
 
     # DC operating-point simulation of a published schematic (real ngspice solve).
     # Body: {prefix, bucket?, sources?:[{net, volts}]}.
-    @app.post("/v1/schematic/simulate", tags=["schematic"])
+    @app.post(
+        "/v1/schematic/simulate",
+        tags=["schematic"],
+        summary="Run a real ngspice DC operating-point simulation on a schematic",
+    )
     async def schematic_simulate(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         body: dict,
     ):
+        """Run a REAL ngspice DC operating-point solve (in-process libngspice via
+        PySpice) on a published schematic: energize specific nets or use the
+        auto-detected supplies.
+
+        Body: ``{prefix, bucket?, sources?: [{net, volts}]}``. Returns the circuit
+        classification, what was energized, and the resulting node voltages.
+        """
         import dataclasses
         import json as _json
 

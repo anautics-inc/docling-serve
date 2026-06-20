@@ -4,6 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from docling_serve.settings import DoclingServeSettings
@@ -73,15 +74,20 @@ def test_nonexistent_config_file_ignored(monkeypatch):
     assert settings.default_vlm_preset == "granite_docling"
 
 
-def test_invalid_yaml_ignored(monkeypatch):
-    """Test that invalid YAML is silently ignored."""
+def test_invalid_yaml_fails_closed(monkeypatch):
+    """Malformed config must be loud, not silently ignored (Article VII.4).
+
+    A swallowed parse error would leave the service running on defaults while the
+    operator believes their config applied; settings construction must surface
+    the failure instead.
+    """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write("invalid: yaml: [")
         config_path = f.name
 
     try:
         monkeypatch.setenv("DOCLING_SERVE_CONFIG_FILE", config_path)
-        settings = DoclingServeSettings()
-        assert settings.default_vlm_preset == "granite_docling"
+        with pytest.raises(yaml.YAMLError):
+            DoclingServeSettings()
     finally:
         Path(config_path).unlink()

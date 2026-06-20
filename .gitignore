@@ -3,6 +3,9 @@ scratch/
 .md-lint
 actionlint
 
+# Retired-fork scratch/experiment artifacts — never collected by pytest
+tests/trash/
+
 # Environment files — contain secrets, never commit
 .env
 .env.*

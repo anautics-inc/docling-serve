@@ -160,12 +160,52 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         signal_pages = sorted(
             {e.page_number for e in entries if e.page_number} | set(_parts_header_pages(pages))
         )
-        if signal_pages:
+        drawing_pages: list[int] = []
+        classified = False
+        if not signal_pages:
+            # No cheap signal (blank/dirty text, no detectable header): ask the
+            # vision model to classify every page from a thumbnail, then read the
+            # exact parts pages it finds (they can be scattered across sections).
+            from docling_serve.technical_order.page_classifier import classify_pages
+
+            page_types = classify_pages(
+                pdf_path,
+                triage.page_count,
+                base_url=vcfg["base_url"],
+                api_key=vcfg["api_key"],
+                model=vcfg["model"],
+            )
+            classified = True
+            signal_pages = sorted(p for p, t in page_types.items() if t == "parts")
+            drawing_pages = sorted(p for p, t in page_types.items() if t == "drawing")
+            if signal_pages:
+                notes.append(f"vision page classifier: parts pages {signal_pages[:10]}")
+
+        if classified and signal_pages:
+            # The classifier names the exact parts pages (possibly scattered); mixed
+            # drawing+parts pages may be labelled either way, so read both kinds.
+            candidate_pages = sorted(set(signal_pages) | set(drawing_pages))[:max_pages]
+        elif signal_pages:
+            # Text/header signal: the parts section is contiguous, so read a run
+            # forward from the first signal page (a page rarely repeats the header).
             start = signal_pages[0]
             run = set(range(start, min(triage.page_count, start + max_pages - 1) + 1))
             candidate_pages = sorted(run | set(signal_pages))[:max_pages]
         else:
             candidate_pages = list(range(1, min(triage.page_count, max_pages) + 1))
+
+        # Capture drawings the OCR captions missed: a classifier-found drawing page
+        # with no detected figure becomes a renderable figure record (the image is
+        # published even without callouts).
+        if drawing_pages:
+            from docling_serve.technical_order.mpl import FigureRecord
+
+            have_pages = {f.page_number for f in figures}
+            for dp in drawing_pages:
+                if dp not in have_pages:
+                    figures.append(
+                        FigureRecord(figure_number=f"P{dp}", figure_title="(drawing)", page_number=dp)
+                    )
         try:
             v_entries, v_stats = vision_parse_parts(
                 pdf_path,

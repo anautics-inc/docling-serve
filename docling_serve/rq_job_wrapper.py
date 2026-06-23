@@ -130,8 +130,16 @@ def instrumented_docling_task(  # noqa: C901
                         convert_sources.append(str(source.url))
                         info = {"type": "HttpSource", "url": str(source.url)}
                         source_info.append(info)
-                        if headers is None and source.headers:
-                            headers = source.headers
+                        if source.headers:
+                            if headers is None:
+                                headers = {}
+                            for key, value in source.headers.items():
+                                if key in headers and headers[key] != value:
+                                    logger.warning(
+                                        f"HttpSource header collision for {key!r}: "
+                                        f"existing={headers[key]!r}, new={value!r} (using new)"
+                                    )
+                                headers[key] = value
                         prep_span.add_event(f"source_{idx}_prepared", info)
 
                 prep_span.set_attribute("num_sources", len(convert_sources))

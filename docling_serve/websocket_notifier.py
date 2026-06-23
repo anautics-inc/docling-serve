@@ -45,6 +45,7 @@ class WebsocketNotifier(BaseNotifier):
                 task_status=task.task_status,
                 task_position=task_queue_position,
                 task_meta=task.processing_meta,
+                error_message=getattr(task, "error_message", None),
             )
         except Exception as e:
             _log.error(f"Error fetching status for task {task_id}: {e}")

@@ -24,6 +24,12 @@ class ServicePolicy:
     s3_enabled: bool
     callbacks_enabled: bool
     custom_vlm_enabled: bool
+    custom_picture_description_enabled: bool
+    custom_code_formula_enabled: bool
+    custom_table_structure_enabled: bool
+    custom_layout_enabled: bool
+    custom_picture_classification_enabled: bool
+    custom_ocr_enabled: bool
 
 
 def build_service_policy(settings: DoclingServeSettings) -> ServicePolicy:
@@ -43,6 +49,16 @@ def build_service_policy(settings: DoclingServeSettings) -> ServicePolicy:
         s3_enabled=settings.eng_kind == AsyncEngine.KFP,
         callbacks_enabled=True,
         custom_vlm_enabled=settings.allow_custom_vlm_config,
+        custom_picture_description_enabled=(
+            settings.allow_custom_picture_description_config
+        ),
+        custom_code_formula_enabled=settings.allow_custom_code_formula_config,
+        custom_table_structure_enabled=settings.allow_custom_table_structure_config,
+        custom_layout_enabled=settings.allow_custom_layout_config,
+        custom_picture_classification_enabled=(
+            settings.allow_custom_picture_classification_config
+        ),
+        custom_ocr_enabled=settings.allow_custom_ocr_config,
     )
 
 
@@ -97,6 +113,45 @@ def validate_convert_options(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Custom VLM configuration is disabled by server policy.",
         )
+
+    custom_config_gates = (
+        (
+            options.picture_description_custom_config,
+            policy.custom_picture_description_enabled,
+            "picture description",
+        ),
+        (
+            options.code_formula_custom_config,
+            policy.custom_code_formula_enabled,
+            "code formula",
+        ),
+        (
+            options.table_structure_custom_config,
+            policy.custom_table_structure_enabled,
+            "table structure",
+        ),
+        (
+            options.layout_custom_config,
+            policy.custom_layout_enabled,
+            "layout",
+        ),
+        (
+            options.picture_classification_custom_config,
+            policy.custom_picture_classification_enabled,
+            "picture classification",
+        ),
+        (
+            options.ocr_custom_config,
+            policy.custom_ocr_enabled,
+            "OCR",
+        ),
+    )
+    for custom_config, enabled, label in custom_config_gates:
+        if custom_config is not None and not enabled:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(f"Custom {label} configuration is disabled by server policy."),
+            )
 
 
 def validate_convert_request(

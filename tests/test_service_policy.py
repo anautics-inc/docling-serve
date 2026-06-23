@@ -45,6 +45,28 @@ def test_validate_convert_options_rejects_timeout_above_policy():
         validate_convert_options(ConvertDocumentsOptions(document_timeout=11), policy)
 
 
+def test_validate_convert_options_rejects_disabled_layout_custom_config():
+    policy = build_service_policy(
+        DoclingServeSettings(allow_custom_layout_config=False)
+    )
+
+    with pytest.raises(
+        HTTPException,
+        match="Custom layout configuration is disabled by server policy",
+    ):
+        validate_convert_options(
+            ConvertDocumentsOptions(layout_custom_config={"foo": "bar"}), policy
+        )
+
+
+def test_validate_convert_options_allows_enabled_ocr_custom_config():
+    policy = build_service_policy(DoclingServeSettings(allow_custom_ocr_config=True))
+
+    validate_convert_options(
+        ConvertDocumentsOptions(ocr_custom_config={"foo": "bar"}), policy
+    )
+
+
 def test_validate_convert_request_rejects_s3_without_kfp():
     policy = build_service_policy(DoclingServeSettings(eng_kind=AsyncEngine.LOCAL))
     request = ConvertDocumentsRequest(

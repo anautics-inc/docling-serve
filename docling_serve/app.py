@@ -226,8 +226,9 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             _log.info("Zombie reaper cancelled.")
 
-    # Remove scratch directory in case it was a tempfile
-    if docling_serve_settings.scratch_path is not None:
+    # Remove scratch directory only when it was an auto-created tempdir
+    # (scratch_path unset). Never delete an operator-configured scratch_path.
+    if docling_serve_settings.scratch_path is None:
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
@@ -351,10 +352,16 @@ def create_app():  # noqa: C901
     methods = docling_serve_settings.cors_methods
     headers = docling_serve_settings.cors_headers
 
+    # Credentials cannot be combined with a wildcard origin: Starlette would
+    # otherwise reflect any Origin and return Access-Control-Allow-Credentials,
+    # granting credentialed cross-origin access to every site. Only allow
+    # credentials when the operator pins an explicit origin allowlist.
+    allow_credentials = "*" not in origins
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=methods,
         allow_headers=headers,
     )
@@ -519,9 +526,20 @@ def create_app():  # noqa: C901
         # Load the uploaded files to Docling DocumentStream
         file_sources: list[TaskSource] = []
         for i, file in enumerate(files):
-            file_bytes = file.file.read()
+            if (
+                file.size is not None
+                and file.size > docling_serve_settings.max_file_size
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=(
+                        "File exceeds the maximum allowed size of "
+                        f"{docling_serve_settings.max_file_size} bytes."
+                    ),
+                )
+            file_bytes = await asyncio.to_thread(file.file.read)
             buf = BytesIO(file_bytes)
-            suffix = "" if len(file_sources) == 1 else f"_{i}"
+            suffix = "" if len(files) == 1 else f"_{i}"
             name = file.filename if file.filename else f"file{suffix}.pdf"
 
             # Log file details for debugging transmission issues
@@ -854,7 +872,12 @@ def create_app():  # noqa: C901
         )
 
         if not completed:
-            # TODO: abort task!
+            try:
+                await orchestrator.delete_task(task_id=task.task_id)
+            except Exception:
+                _log.warning(
+                    "Failed to abort timed-out task %s", task.task_id, exc_info=True
+                )
             raise HTTPException(
                 status_code=504,
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
@@ -922,7 +945,12 @@ def create_app():  # noqa: C901
         )
 
         if not completed:
-            # TODO: abort task!
+            try:
+                await orchestrator.delete_task(task_id=task.task_id)
+            except Exception:
+                _log.warning(
+                    "Failed to abort timed-out task %s", task.task_id, exc_info=True
+                )
             raise HTTPException(
                 status_code=504,
                 detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
@@ -1760,7 +1788,14 @@ def create_app():  # noqa: C901
             )
 
             if not completed:
-                # TODO: abort task!
+                try:
+                    await orchestrator.delete_task(task_id=task.task_id)
+                except Exception:
+                    _log.warning(
+                        "Failed to abort timed-out task %s",
+                        task.task_id,
+                        exc_info=True,
+                    )
                 raise HTTPException(
                     status_code=504,
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
@@ -1859,7 +1894,14 @@ def create_app():  # noqa: C901
             )
 
             if not completed:
-                # TODO: abort task!
+                try:
+                    await orchestrator.delete_task(task_id=task.task_id)
+                except Exception:
+                    _log.warning(
+                        "Failed to abort timed-out task %s",
+                        task.task_id,
+                        exc_info=True,
+                    )
                 raise HTTPException(
                     status_code=504,
                     detail=f"Conversion is taking too long. The maximum wait time is configure as DOCLING_SERVE_MAX_SYNC_WAIT={docling_serve_settings.max_sync_wait}.",
@@ -2137,9 +2179,9 @@ def create_app():  # noqa: C901
     async def clear_results(
         auth: Annotated[AuthenticationResult, Depends(require_auth)],
         orchestrator: Annotated[BaseOrchestrator, Depends(get_async_orchestrator)],
-        older_then: float = 3600,
+        older_than: float = 3600,
     ):
-        await orchestrator.clear_results(older_than=older_then)
+        await orchestrator.clear_results(older_than=older_than)
         return ClearResponse()
 
     @app.get("/v1/memory/stats", tags=["management"])
@@ -2153,22 +2195,28 @@ def create_app():  # noqa: C901
         rss_mb = process.memory_info().rss / 1024 / 1024
         stats = {}
 
-        # total memory (this is what triggers OOM)
-        with open("/sys/fs/cgroup/memory.current") as f:  # noqa: ASYNC230
-            stats["cgroup_total"] = int(f.read()) / 1024 / 1024
+        # total memory (this is what triggers OOM); cgroup v2 only
+        try:
+            with open("/sys/fs/cgroup/memory.current") as f:  # noqa: ASYNC230
+                stats["cgroup_total"] = int(f.read()) / 1024 / 1024
+        except OSError:
+            stats["cgroup_total"] = None
 
         # detailed breakdown
-        with open("/sys/fs/cgroup/memory.stat") as f:  # noqa: ASYNC230
-            for line in f:
-                key, value = line.split()
-                stats[key] = int(value) / 1024 / 1024
+        try:
+            with open("/sys/fs/cgroup/memory.stat") as f:  # noqa: ASYNC230
+                for line in f:
+                    key, value = line.split()
+                    stats[key] = int(value) / 1024 / 1024
+        except OSError:
+            pass
 
         return {
             "rss": rss_mb,
             "anon": stats.get("anon", 0.0),
             "file": stats.get("file", 0.0),
             "slab": stats.get("slab", 0.0),
-            "cgroup_total": stats["cgroup_total"],
+            "cgroup_total": stats.get("cgroup_total"),
         }
 
     @app.get("/v1/memory/counts", tags=["management"])

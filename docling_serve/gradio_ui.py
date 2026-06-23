@@ -259,13 +259,12 @@ def wait_task_finish(auth: str, task_id: str, return_as_file: bool):
 
             # Check response status code first
             if response.status_code == 404:
-                logger.warning(
-                    f"Task {task_id} not found in status poll, it may have completed already"
+                logger.error(
+                    f"Task {task_id} not found in status poll (unknown, expired, or removed)"
                 )
-                time.sleep(2)  # Wait for result to be ready
-                conversion_sucess = True
+                conversion_sucess = False
                 task_finished = True
-                break
+                raise RuntimeError(f"Task {task_id} not found")
 
             response.raise_for_status()
 

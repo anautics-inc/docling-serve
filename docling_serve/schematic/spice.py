@@ -32,7 +32,67 @@ _PRIMITIVES = (
     ("inductor", "L"),
 )
 
+#: Placeholder values for primitives whose printed value the drawing omits
+#: (or OCR missed). Type-typical orders of magnitude — a bare "C" must never
+#: become 1 FARAD. Every use is flagged with an ``* ASSUMED`` comment.
+_PRIMITIVE_DEFAULTS = {"R": "10k", "C": "100n", "L": "1m"}
+
 _NODE_SANITIZE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+#: Ground semantics: net names / component types that mean "this is the
+#: reference node". Mirrors the simulation module's detection (which imports
+#: these) so the emitted netlist and the stimulus builder can never disagree.
+GROUND_NAME_RE = re.compile(
+    r"^(GND|GROUND|VSS|CHASSIS|EARTH|COM|COMMON|0V|RETURN|RTN|SIG\s*GND|CHASSIS\s*GROUND)$",
+    re.IGNORECASE,
+)
+#: MIL-W-5088 aircraft wire codes: the trailing N segment marks a ground wire.
+MIL_GROUND_WIRE_RE = re.compile(r"^[A-Z0-9]+N$", re.IGNORECASE)
+_GROUND_TYPE_RE = re.compile(r"\b(ground|gnd|chassis|earth)\b", re.IGNORECASE)
+
+
+def is_ground_net(net: dict[str, Any]) -> bool:
+    """Does this net's name/class mark it as the reference (ground) net?"""
+    if str(net.get("class") or "").strip().lower() == "ground":
+        return True
+    if str(net.get("signalType") or "").strip().lower() == "ground":
+        return True
+    for candidate in (net.get("name"), net.get("wireId")):
+        text = str(candidate or "").strip()
+        if text and (GROUND_NAME_RE.match(text) or MIL_GROUND_WIRE_RE.match(text)):
+            return True
+    return False
+
+
+def is_ground_component(component: dict[str, Any]) -> bool:
+    """Is this a ground SYMBOL (chassis/earth/signal ground glyph)?"""
+    return bool(_GROUND_TYPE_RE.search(str(component.get("type") or "")))
+
+
+def ground_net_ids(graph: dict[str, Any]) -> set[str]:
+    """Net ids that must collapse to SPICE node 0.
+
+    A net is ground when its own labels say so (:func:`is_ground_net`) or when
+    a ground SYMBOL touches it — the drawing's way of tying a wire to the
+    reference. Both are structural facts, not simulation guesses.
+    """
+    ground_components = {
+        str(c.get("id"))
+        for c in graph.get("components") or []
+        if isinstance(c, dict) and is_ground_component(c)
+    }
+    out: set[str] = set()
+    for net in graph.get("nets") or []:
+        if not isinstance(net, dict):
+            continue
+        touched = {
+            str(m.get("component"))
+            for m in net.get("nodes") or []
+            if isinstance(m, dict) and m.get("component")
+        }
+        if is_ground_net(net) or (touched & ground_components):
+            out.add(str(net.get("id") or ""))
+    return out
 
 
 def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
@@ -40,6 +100,12 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
 
     Model resolution per component, in order: catalog/vendor model →
     inferred first-order physics (``spice_inference``) → connectivity stub.
+
+    Ground semantics are structural: nets labeled as ground (or touched by a
+    ground symbol) become SPICE node 0, and ground symbols themselves are not
+    emitted as components. Components with no traced net membership at all
+    are omitted (with an audit comment) — floating elements only poison the
+    matrix and can never affect a solve.
     """
     from docling_serve.schematic.spice_inference import (
         InferredBody,
@@ -52,7 +118,7 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
     nets = [n for n in graph.get("nets") or [] if isinstance(n, dict)]
     tenant_id = _graph_tenant(graph)
 
-    node_by_membership = _node_assignments(nets)
+    node_by_membership = _node_assignments(nets, node_names=net_node_names(graph))
 
     lines: list[str] = [
         f"* {graph.get('titleBlock', {}).get('title') or source_name}".strip(),
@@ -73,6 +139,23 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
         ref = _sanitize(str(component.get("refDes") or comp_id))
         ctype = str(component.get("type") or "").lower()
         nodes = node_by_membership.get(comp_id) or []
+
+        # Ground symbols are node-0 semantics, not devices: their nets were
+        # already collapsed to 0 by _node_assignments, so emitting them as
+        # elements would only add fake 2-pin bodies dangling off the reference.
+        if is_ground_component(component):
+            continue
+
+        # A component with NO traced net membership can never carry current;
+        # emitted anyway it sits on floating NC_* nodes and makes the matrix
+        # singular. Omit it, but leave an audit trail in the netlist.
+        if not nodes:
+            lines.append(
+                f"* OMITTED {ref}: no traced net membership (component floats"
+                " — see the extraction QA worklist)"
+            )
+            continue
+
         pins = [p for p in component.get("pins") or [] if isinstance(p, dict)]
         pin_count = max(len(nodes), len(pins), 2)
 
@@ -110,7 +193,11 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
         )
         if prefix and pin_count == 2:
             name = _unique(f"{prefix}{ref}", element_names, prefix)
-            value = _component_value(component)
+            value, assumed = _component_value(component, prefix)
+            if assumed:
+                lines.append(
+                    f"* ASSUMED {name} value {value} (drawing prints no value)"
+                )
             lines.append(f"{name} {nodes[0]} {nodes[1]} {value}")
             continue
 
@@ -238,26 +325,55 @@ def _graph_tenant(graph: dict[str, Any]) -> str | None:
     return str(tenant) if tenant else None
 
 
-def _node_assignments(nets: list[dict[str, Any]]) -> dict[str, list[str]]:
+def net_node_names(graph: dict[str, Any]) -> dict[str, str]:
+    """Net id -> the SPICE node name the emitter assigns it.
+
+    THE authoritative mapping: ground nets (see :func:`ground_net_ids`) are
+    the literal reference node ``0``; every other net gets its sanitized
+    printed name, uniquified. The simulation stimulus builder uses this same
+    function, so sources always land on the emitted node names.
+    """
+    grounded = ground_net_ids(graph)
+    names: dict[str, str] = {}
+    used_names: set[str] = {"0"}
+    nets = [n for n in graph.get("nets") or [] if isinstance(n, dict)]
+    for index, net in enumerate(nets, start=1):
+        net_id = str(net.get("id") or "")
+        if net_id in grounded:
+            names[net_id] = "0"
+            continue
+        raw = net.get("name") or net.get("wireId") or f"N{index:03d}"
+        names[net_id] = _unique(sanitize_node(str(raw)), used_names, "N")
+    return names
+
+
+def _node_assignments(
+    nets: list[dict[str, Any]], *, node_names: dict[str, str]
+) -> dict[str, list[str]]:
     """Component id -> ordered SPICE node names from net memberships."""
     out: dict[str, list[str]] = {}
-    used_names: set[str] = set()
-    for index, net in enumerate(nets, start=1):
-        raw = net.get("name") or net.get("wireId") or f"N{index:03d}"
-        node = _unique(_sanitize(str(raw)), used_names, "N")
+    for net in nets:
+        node = node_names.get(str(net.get("id") or ""))
+        if node is None:
+            continue
         for member in net.get("nodes") or []:
             if isinstance(member, dict) and member.get("component"):
                 out.setdefault(str(member["component"]), []).append(node)
     return out
 
 
-def _component_value(component: dict[str, Any]) -> str:
-    """Best-effort primitive value (1 when the drawing doesn't print one)."""
+def _component_value(component: dict[str, Any], prefix: str) -> tuple[str, bool]:
+    """Best-effort primitive value as ``(value, assumed)``.
+
+    When the drawing prints no value, returns the type-typical placeholder
+    from :data:`_PRIMITIVE_DEFAULTS` with ``assumed=True`` so the emitter can
+    flag it — silently defaulting to ``1`` meant 1 FARAD for a bare cap.
+    """
     value = str(component.get("value") or "").strip()
     match = re.match(r"^(\d+(?:\.\d+)?)\s*([kKmMuUnNpPfFgG]?)", value)
     if match:
-        return match.group(1) + match.group(2).lower()
-    return "1"
+        return match.group(1) + match.group(2).lower(), False
+    return _PRIMITIVE_DEFAULTS.get(prefix, "1"), True
 
 
 def _subckt_name(component: dict[str, Any], fallback: str) -> str:
@@ -265,9 +381,32 @@ def _subckt_name(component: dict[str, Any], fallback: str) -> str:
     return "SC_" + _sanitize(str(base)).upper()
 
 
+def sanitize_node(text: str) -> str:
+    """SPICE-legal node/ref name that PRESERVES polarity signs.
+
+    ``+13 VDC`` and ``-13 VDC`` are different rails; the old strip-everything
+    sanitizer collapsed both to ``13_VDC`` and silently resolved the collision
+    with a ``_2`` suffix — polarity lost, model wrong-but-passing. Leading and
+    trailing signs (``B+`` / ``B-``) are encoded as ``P``/``N`` markers.
+    """
+    t = text.strip()
+    prefix = ""
+    if t.startswith("+"):
+        prefix, t = "P", t[1:]
+    elif t.startswith("-"):
+        prefix, t = "N", t[1:]
+    suffix = ""
+    if t.endswith("+"):
+        suffix, t = "_P", t[:-1]
+    elif t.endswith("-"):
+        suffix, t = "_N", t[:-1]
+    cleaned = _NODE_SANITIZE_RE.sub("_", t).strip("_")
+    combined = f"{prefix}{cleaned}{suffix}".strip("_")
+    return combined or "X"
+
+
 def _sanitize(text: str) -> str:
-    cleaned = _NODE_SANITIZE_RE.sub("_", text.strip()).strip("_")
-    return cleaned or "X"
+    return sanitize_node(text)
 
 
 def _unique(name: str, used: set[str], prefix: str) -> str:

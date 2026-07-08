@@ -1,0 +1,44 @@
+{
+  "drawing": "main_schematic",
+  "sourcePdf": "main_schematic.pdf",
+  "kind": "digital-logic",
+  "notes": "EasyEDA 'Nixie Clock' (Esteban De Farias). A dense digital/mixed board - the opposite type from Figure 3-2, so it proves the pipeline generalizes. Capacitors ARE present here (decoupling), so they are NOT forbidden; the assertions are the load-bearing structural counts (resistor bank, nixie tubes, driver transistors, logic ICs) with wide tolerance for the run-to-run wobble of a dense sheet.",
+  "componentsByFamily": {
+    "resistor": 40,
+    "transistor": 11,
+    "tube": 7,
+    "ic": 8,
+    "led": 2,
+    "buzzer": 2,
+    "switch": 3,
+    "capacitor": 2,
+    "ground": 5
+  },
+  "componentTolerance": {
+    "resistor": 12,
+    "transistor": 5,
+    "tube": 2,
+    "ic": 4,
+    "led": 2,
+    "buzzer": 2,
+    "switch": 2,
+    "capacitor": 4,
+    "ground": 5
+  },
+  "forbiddenFamilies": {
+    "off-page": 6,
+    "power supply": 2
+  },
+  "namedNets": [
+    "GND",
+    "VCC",
+    "TUBE0_ANODE",
+    "TUBE1_ANODE",
+    "DIGIT_0",
+    "DIGIT_1"
+  ],
+  "minNamedNetCoverage": 0.6,
+  "minComponentScore": 0.55,
+  "minVerifiedFraction": 0.4,
+  "minOverall": 0.55
+}

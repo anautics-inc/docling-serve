@@ -378,6 +378,26 @@ def _is_page_background(
     )
 
 
+#: Longest dimension (pt) a filled path may have and still replay as a filled
+#: KiCad polygon. KiCad's polyline fill paints with the STROKE color ("outline"
+#: fill), which is only correct for glyph outlines, junction dots, arrowheads
+#: and similar solid marks — all glyph-scale. Larger filled paths (component
+#: body tints, title-block panels, border rings drawn as even-odd hole
+#: subpaths) would flood their area with an opaque rectangle and bury the
+#: line work under it, so they are demoted to their outline.
+_MAX_FILLED_SHAPE_PT = 20.0
+
+
+def _is_marker_sized(points: list[tuple[float, float]]) -> bool:
+    """True when a shape is small enough to be a glyph or solid marker."""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return (
+        max(xs) - min(xs) <= _MAX_FILLED_SHAPE_PT
+        and max(ys) - min(ys) <= _MAX_FILLED_SHAPE_PT
+    )
+
+
 def _page_dimensions(root: ET.Element) -> tuple[float, float]:
     view_box = root.get("viewBox")
     if view_box:
@@ -450,7 +470,8 @@ class _GeometryWalker:
 
         for points, closed in parse_path_data(d):
             mapped = [_apply(matrix, x, y) for x, y in points]
-            if filled and not stroked and _is_page_background(
+            fill_only = filled and not stroked
+            if fill_only and _is_page_background(
                 mapped, self._geometry.width_pt, self._geometry.height_pt
             ):
                 continue
@@ -458,7 +479,7 @@ class _GeometryWalker:
                 _Shape(
                     points=mapped,
                     closed=closed,
-                    filled=filled and not stroked,
+                    filled=fill_only and _is_marker_sized(mapped),
                     stroke_width_pt=stroke_width_pt,
                     color=color,
                 )
@@ -545,16 +566,67 @@ KICAD_IMAGE_BASE_DPI = 300.0
 _JUNCTION_TOLERANCE_PT = 1.5
 
 
+def net_display_name(net: dict[str, Any]) -> str | None:
+    """The label KiCad should carry for this net: printed name, else wire id.
+
+    Every net has a wire id after connectivity-id assignment, so every net's
+    copper can carry its identity — the label is what electrically JOINS the
+    net's islands (traced wire runs, symbol stub wires) into ONE net without
+    fabricating bridging geometry.
+
+    Ground nets are all labeled ``GND``: ngspice aliases that name to node 0,
+    so KiCad's simulator gets its reference — the same unification the SPICE
+    emitter performs by collapsing ground nets to ``0``.
+    """
+    from docling_serve.schematic.spice import is_ground_net
+
+    if is_ground_net(net):
+        return "GND"
+    name = str(net.get("name") or "").strip()
+    if name:
+        return name
+    wire_id = str(net.get("wireId") or "").strip()
+    return wire_id or None
+
+
+def _label_sexpr(name: str, x_mm: float, y_mm: float) -> str:
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        f'  (label "{escaped}" (at {_fmt(x_mm)} {_fmt(y_mm)} 0) '
+        f"(effects (font (size 1.27 1.27)) (justify left bottom)) "
+        f'(uuid "{uuid.uuid4()}"))'
+    )
+
+
+def _global_label_sexpr(name: str, x_mm: float, y_mm: float) -> str:
+    """A global label — the schematic-standard terminator for an off-page or
+    island endpoint. Connectivity-wise it counts as a real connection (a pin
+    wired only to it is CONNECTED for ERC), and same-name labels join their
+    islands into one electrical net across the whole document."""
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        f'  (global_label "{escaped}" (shape passive) (at {_fmt(x_mm)} {_fmt(y_mm)} 0) '
+        f"(effects (font (size 1.27 1.27)) (justify left)) "
+        f'(uuid "{uuid.uuid4()}"))'
+    )
+
+
 def net_label_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
     """KiCad ``(label …)`` items naming each net ON its wire.
 
     A label bound to the copper is how KiCad carries net identity through
-    edits — rename, drag, extend, and the netlist still says A8B22. Placed
-    at the midpoint of the net's longest segment (guaranteed on-wire).
+    edits — rename, drag, extend, and the netlist still says A8B22. One
+    label sits at the midpoint of the net's longest segment; every DANGLING
+    segment endpoint (degree 1 within the net — an off-page stub or an
+    island the tracer couldn't bridge) gets one too, so all of a net's
+    islands join into one electrical net by name.
     """
     items: list[str] = []
     for net in nets:
-        if not isinstance(net, dict) or not net.get("name"):
+        if not isinstance(net, dict):
+            continue
+        name = net_display_name(net)
+        if not name:
             continue
         if net.get("page") not in (None, page_no):
             continue
@@ -564,19 +636,68 @@ def net_label_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
             if isinstance(s, (list, tuple)) and len(s) == 4
         ]
         if not segments:
+            # No traced copper: the net's stub wires are labeled where they
+            # are emitted (build_symbol_instances) — a floating label here
+            # would only dangle.
             continue
+        danglers = _dangling_endpoints(segments)
+        if danglers:
+            # Dangling copper ends are off-page runs or islands the tracer
+            # couldn't bridge — terminate each with a GLOBAL label so ERC
+            # sees intent and same-name islands merge electrically. Global
+            # everywhere (stub ends are global too): mixing in a local twin
+            # would trip ERC's same_local_global_label.
+            for px, py in danglers:
+                items.append(_global_label_sexpr(name, px * PT_TO_MM, py * PT_TO_MM))
+            continue
+        # Closed copper (no dangling ends): one on-wire identity label,
+        # nudged off junction points (a label ON a junction trips ERC's
+        # label_multiple_wires).
         longest = max(
             segments, key=lambda s: (s[2] - s[0]) ** 2 + (s[3] - s[1]) ** 2
         )
-        mx = (float(longest[0]) + float(longest[2])) / 2 * PT_TO_MM
-        my = (float(longest[1]) + float(longest[3])) / 2 * PT_TO_MM
-        name = str(net["name"]).replace("\\", "\\\\").replace('"', '\\"')
-        items.append(
-            f'  (label "{name}" (at {_fmt(mx)} {_fmt(my)} 0) '
-            f"(effects (font (size 1.27 1.27)) (justify left bottom)) "
-            f'(uuid "{uuid.uuid4()}"))'
-        )
+        junction_keys = {
+            key
+            for key, points in _endpoint_buckets(segments).items()
+            if len(points) >= 3
+        }
+        for fraction in (0.5, 0.25, 0.75):
+            mx_pt = float(longest[0]) + (float(longest[2]) - float(longest[0])) * fraction
+            my_pt = float(longest[1]) + (float(longest[3]) - float(longest[1])) * fraction
+            key = (
+                round(mx_pt / _JUNCTION_TOLERANCE_PT),
+                round(my_pt / _JUNCTION_TOLERANCE_PT),
+            )
+            if key not in junction_keys:
+                break
+        items.append(_global_label_sexpr(name, mx_pt * PT_TO_MM, my_pt * PT_TO_MM))
     return items
+
+
+def _endpoint_buckets(
+    segments: list[Any],
+) -> dict[tuple[int, int], list[tuple[float, float]]]:
+    """Segment endpoints grouped by junction-tolerance bucket, in pt."""
+    counts: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for segment in segments:
+        for px, py in ((segment[0], segment[1]), (segment[2], segment[3])):
+            key = (
+                round(float(px) / _JUNCTION_TOLERANCE_PT),
+                round(float(py) / _JUNCTION_TOLERANCE_PT),
+            )
+            counts.setdefault(key, []).append((float(px), float(py)))
+    return counts
+
+
+def _dangling_endpoints(
+    segments: list[Any],
+) -> list[tuple[float, float]]:
+    """Endpoints touched by exactly one segment (within one net), in pt."""
+    return [
+        points[0]
+        for points in _endpoint_buckets(segments).values()
+        if len(points) == 1
+    ]
 
 
 def junction_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
@@ -717,6 +838,50 @@ def net_wires_sexpr(nets: list[Any], *, page_no: int) -> list[str]:
                 f'(stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))'
             )
     return items
+
+
+#: ERC severities for GENERATED replay documents, shipped as a sibling
+#: ``.kicad_pro``. Each entry is STRUCTURAL for reverse-engineered sheets,
+#: not a hidden defect (the graph-level delivery checks report extraction
+#: gaps honestly):
+#: * endpoint_off_grid — geometry replays the page's own coordinates; the
+#:   drawing is the ground truth, not KiCad's edit grid.
+#: * isolated_pin_label — off-page runs legitimately reach one pin on this
+#:   sheet and terminate in a named global label.
+#: * pin_to_pin / power_pin_not_driven — stand-in symbols (generic blocks,
+#:   GND glyphs) carry approximate pin TYPES; no power source symbols exist
+#:   by design, the SPICE deck injects the supplies.
+_PROJECT_ERC_SEVERITIES = {
+    "endpoint_off_grid": "ignore",
+    "isolated_pin_label": "ignore",
+    "pin_to_pin": "ignore",
+    "power_pin_not_driven": "ignore",
+}
+
+
+def project_file_json() -> str:
+    """A minimal ``.kicad_pro`` carrying the generated-document ERC policy."""
+    import json as _json
+
+    return _json.dumps(
+        {
+            "board": {},
+            "erc": {"rule_severities": dict(_PROJECT_ERC_SEVERITIES)},
+            "meta": {"filename": "generated.kicad_pro", "version": 3},
+            "schematic": {"legacy_lib_dir": "", "legacy_lib_list": []},
+        },
+        indent=2,
+    )
+
+
+def write_project_files(kicad_sch_paths: list[Any]) -> list[Any]:
+    """Sibling ``<stem>.kicad_pro`` for every generated schematic document."""
+    written = []
+    for sch_path in kicad_sch_paths:
+        pro_path = sch_path.with_suffix(".kicad_pro")
+        pro_path.write_text(project_file_json())
+        written.append(pro_path)
+    return written
 
 
 def inject_items(kicad_text: str, items: list[str]) -> str:

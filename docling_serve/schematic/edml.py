@@ -26,6 +26,7 @@ from typing import Any
 from docling_serve.schematic.eevision import (
     cavity_ids_for,
     din_symbol,
+    net_connection_plan,
     net_label,
     safe_id,
     wire_type,
@@ -76,7 +77,22 @@ def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
         lines.append(f"Wire {ref} | " + ", ".join(properties) + ";")
     lines.append("")
 
-    # 2. Components: one connector, pin-designator cavities, Joins to wires.
+    # 2. Components: one connector, pin-designator cavities, Joins to wires,
+    #    Arcs for component-internal connections (duplicate net memberships).
+    raw_ids = {str(c.get("id")) for c in components}
+    cavities = {raw_id: cavity_ids_for(raw_id, nets) for raw_id in raw_ids}
+    plan = net_connection_plan(nets, raw_ids, cavities)
+    joins_by_component: dict[str, list[str]] = {}
+    arcs_by_component: dict[str, list[tuple[str, str]]] = {}
+    for net, entry in zip(nets, plan):
+        net_ref = wire_ref_by_net.get(str(net.get("id")))
+        if not net_ref:
+            continue
+        for comp_id, cavity in entry["endpoints"]:
+            joins_by_component.setdefault(comp_id, []).append(f"A.{cavity} -> {net_ref}")
+        for comp_id, first_cavity, extra_cavity in entry["arcs"]:
+            arcs_by_component.setdefault(comp_id, []).append((first_cavity, extra_cavity))
+
     lines.append("// Components")
     seen_ids: set[str] = set()
     for order, component in enumerate(components, start=1):
@@ -84,19 +100,66 @@ def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
         if comp_id in seen_ids:
             comp_id = f"{comp_id}_{order}"
         seen_ids.add(comp_id)
-        lines.extend(_component_block(comp_id, component, nets, wire_ref_by_net))
+        raw_id = str(component.get("id"))
+        lines.extend(
+            _component_block(
+                comp_id,
+                component,
+                cavities.get(raw_id, {}),
+                joins_by_component.get(raw_id, []),
+                arcs_by_component.get(raw_id, []),
+            )
+        )
+        lines.append("")
+
+    # 3. Signal modules: one per PRINTED net name, grouping its wire — the
+    #    EEvision-side handle for "show me everything carrying CATHODE_0".
+    signal_lines = _signal_modules(nets, wire_ref_by_net)
+    if signal_lines:
+        lines.append("// Signal modules (printed net names)")
+        lines.extend(signal_lines)
         lines.append("")
 
     return "\n".join(lines) + "\n"
 
 
+def _signal_modules(
+    nets: list[dict[str, Any]], wire_ref_by_net: dict[str, str]
+) -> list[str]:
+    """``Signal`` statements for nets whose name was printed on the drawing.
+
+    Assigned wire ids (``wireIdSource == "assigned"`` with no printed name)
+    carry no signal meaning, so they get no module. Nets sharing one printed
+    name collapse into one module.
+    """
+    wires_by_signal: dict[str, list[str]] = {}
+    for net in nets:
+        name = str(net.get("name") or "").strip()
+        if not name or name == str(net.get("wireId") or ""):
+            continue
+        ref = wire_ref_by_net.get(str(net.get("id")))
+        if ref:
+            wires_by_signal.setdefault(name, []).append(ref)
+
+    lines: list[str] = []
+    used: set[str] = set()
+    for order, (name, refs) in enumerate(sorted(wires_by_signal.items()), start=1):
+        sig_id = safe_id(name, f"SIG{order:03d}")
+        if sig_id in used:
+            sig_id = f"{sig_id}_{order}"
+        used.add(sig_id)
+        lines.append(f"Signal {sig_id} (" + ", ".join(refs) + f") | Name = {_q(name)};")
+    return lines
+
+
 def _component_block(
     comp_id: str,
     component: dict[str, Any],
-    nets: list[dict[str, Any]],
-    wire_ref_by_net: dict[str, str],
+    cavity_by_membership: dict[int, str],
+    joins: list[str],
+    arcs: list[tuple[str, str]],
 ) -> list[str]:
-    """The EDML statements for one component (declaration, cavities, joins)."""
+    """The EDML statements for one component (declaration, cavities, joins, arcs)."""
     properties = [f"Name = {_q(component.get('refDes') or comp_id)}"]
     symbol = din_symbol(component)
     if symbol:
@@ -112,23 +175,15 @@ def _component_block(
     lines = [f"Component {comp_id} | " + ", ".join(properties) + ";"]
 
     # Cavities in membership order; the cavity id IS the pin designator.
-    raw_id = str(component.get("id"))
-    cavity_by_membership = cavity_ids_for(raw_id, nets)
-    joins: list[str] = []
-    membership = 0
-    for net in nets:
-        net_ref = wire_ref_by_net.get(str(net.get("id")))
-        for node in net.get("nodes") or []:
-            if not isinstance(node, dict) or str(node.get("component")) != raw_id:
-                continue
-            membership += 1
-            cavity = cavity_by_membership.get(membership)
-            if cavity and net_ref:
-                joins.append(f"A.{cavity} -> {net_ref}")
     cavity_ids = [cavity_by_membership[k] for k in sorted(cavity_by_membership)]
     if cavity_ids:
         lines.append("Connector A | Type = invisible;")
         lines.append("Cavity " + ", ".join(cavity_ids) + ";")
     if joins:
         lines.append("Join " + ", ".join(joins) + ";")
+    # Component-internal connections (spec §3.6.1 "Arcs"): extraction saw the
+    # same net touch this component more than once — model the extra contact
+    # as an internal electrical connection, not a wire looping back.
+    for arc_no, (first_cavity, extra_cavity) in enumerate(arcs, start=1):
+        lines.append(f"Arc {comp_id}_arc{arc_no} (A.{first_cavity}, A.{extra_cavity});")
     return lines

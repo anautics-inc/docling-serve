@@ -29,7 +29,12 @@ from math import hypot
 from pathlib import Path
 from typing import Any
 
-from docling_serve.schematic.kicad_sch import PT_TO_MM, _fmt
+from docling_serve.schematic.kicad_sch import (
+    PT_TO_MM,
+    _fmt,
+    _global_label_sexpr,
+    net_display_name,
+)
 from docling_serve.schematic.spice_models import find_model
 
 _log = logging.getLogger(__name__)
@@ -55,6 +60,11 @@ TYPE_SYMBOL_MAP: tuple[tuple[str, str, str, str], ...] = (
     ("switch", "Switch", "SW_SPST", "SW"),
     ("button", "Switch", "SW_Push", "SW"),
     ("relay", "Relay", "Relay_SPST-NO", "K"),
+    # A drawing's ground glyph IS KiCad's GND power symbol; mapping it gives
+    # every ground tie a real pin (and unifies the net exactly like the SPICE
+    # exporter's node-0 collapse).
+    ("ground", "power", "GND", "#PWR"),
+    ("earth", "power", "GND", "#PWR"),
 )
 
 #: Connector types map to Connector_Generic:Conn_01xNN sized by pin count.
@@ -77,6 +87,39 @@ def find_symbol_dir() -> Path | None:
         if candidate and (Path(candidate) / "Device.kicad_symdir").exists():
             return Path(candidate)
     return None
+
+
+def ensure_kicad_cli_config() -> None:
+    """Seed the global ``sym-lib-table`` for headless ``kicad-cli`` runs.
+
+    A fresh config home (containers, CI) has no symbol-library table, so
+    every standard-library symbol instance trips ERC's ``lib_symbol_issues``
+    ("configuration does not include the library 'Device'") even though the
+    embedded defs render fine. Copy KiCad's own template table into every
+    version dir of the active config home. Idempotent, best-effort.
+    """
+    symbol_dir = find_symbol_dir()
+    if symbol_dir is None:
+        return
+    template = symbol_dir.parent / "template" / "sym-lib-table"
+    if not template.exists():
+        return
+    config_home = Path(
+        os.environ.get("KICAD_CONFIG_HOME")
+        or Path.home() / ".config" / "kicad"
+    )
+    try:
+        version_dirs = [p for p in config_home.glob("*.*") if p.is_dir()]
+        if not version_dirs:
+            version_dirs = [config_home / "10.0"]
+        for version_dir in version_dirs:
+            table = version_dir / "sym-lib-table"
+            if table.exists():
+                continue
+            version_dir.mkdir(parents=True, exist_ok=True)
+            table.write_text(template.read_text())
+    except OSError:  # read-only config home — kicad-cli will warn, not fail
+        pass
 
 
 class SymbolLibrary:
@@ -150,6 +193,14 @@ def _select_symbol(
         count = max(len(pins), attachment_count, 2)
         count = min(count, 40)
         return "Connector_Generic", f"Conn_01x{count:02d}", "J"
+    # Block fallback: an unmappable type (power supply module, valve
+    # controller, …) that traced wires DO reach still needs pins for ERC and
+    # the KiCad netlist to see a circuit. A generic 1xN header is the
+    # electrically neutral stand-in block — one pin per traced attachment,
+    # printed identity carried by the reference/value fields.
+    if attachment_count >= 1:
+        count = min(max(attachment_count, 2), 40)
+        return "Connector_Generic", f"Conn_01x{count:02d}", "U"
     return None
 
 
@@ -165,10 +216,12 @@ def build_symbol_instances(
     Returns ``(lib_defs by lib_id, document items, mapped component count)``.
     """
     attachments = _attachments_by_component(graph, page_no)
+    unattached = _memberships_without_attachment(graph, page_no)
     used_refs: set[str] = set()
     counters: dict[str, int] = {}
     lib_defs: dict[str, str] = {}
     items: list[str] = []
+    labeled_points: set[tuple[str, float, float]] = set()
     mapped = 0
 
     for component in graph.get("components") or []:
@@ -212,6 +265,14 @@ def build_symbol_instances(
                 ("Sim.Name", model.name),
                 ("Sim.Device", "SUBCKT"),
             ]
+        # Only devices ngspice can elaborate WITHOUT a vendor model stay in
+        # KiCad's simulation netlist: R/C/L primitives (numeric value) and
+        # vendor-model-bound instances. Everything else — connector/block
+        # stand-ins, switches, relays, diodes without models — must carry
+        # exclude_from_sim: a reference like "J3" otherwise netlists as a
+        # JFET with no model and ngspice aborts on the whole deck.
+        native_primitive = lib == "Device" and name in ("R", "C", "L")
+        excluded = not (native_primitive or sim_properties or lib == "power")
         items.append(
             _instance_sexpr(
                 lib_id,
@@ -222,6 +283,7 @@ def build_symbol_instances(
                 pins=pins,
                 sheet_uuid=sheet_uuid,
                 extra_properties=sim_properties,
+                exclude_from_sim=excluded,
             )
         )
 
@@ -229,11 +291,23 @@ def build_symbol_instances(
         # point, so net connectivity reaches the pin and ERC sees a circuit.
         # Symbol-local Y points up; schematic Y points down (KiCad placement
         # rule: world = (cx + px, cy - py) at rotation 0).
-        remaining = [(float(px), float(py)) for px, py in points]
+        remaining = list(points)
+        # Memberships the tracer produced WITHOUT a geometric attachment
+        # (model-sourced or description-inferred): the graph still knows the
+        # net, so an unclaimed pin ties to it by a label ON the pin.
+        unplaced_nets = list(
+            unattached.get(str(component.get("id") or ""), [])
+        )
         for _number, pin_x, pin_y, _angle in pins:
             world_x = center_x + pin_x
             world_y = center_y - pin_y
             if not remaining:
+                if unplaced_nets:
+                    net = unplaced_nets.pop(0)
+                    name = net_display_name(net)
+                    if name:
+                        items.append(_global_label_sexpr(name, world_x, world_y))
+                        continue
                 # No traced wire reaches this pin — declare it intentionally
                 # open with a no-connect marker, the schematic-standard way to
                 # tell ERC "this is known", instead of leaving a violation.
@@ -249,19 +323,47 @@ def build_symbol_instances(
                     remaining[i][1] * PT_TO_MM - world_y,
                 ),
             )
-            att_x, att_y = remaining.pop(nearest)
+            att_x, att_y, net = remaining.pop(nearest)
             items.append(
                 f"  (wire (pts (xy {_fmt(world_x)} {_fmt(world_y)}) "
                 f"(xy {_fmt(att_x * PT_TO_MM)} {_fmt(att_y * PT_TO_MM)})) "
                 f'(stroke (width 0) (type default)) (uuid "{uuid.uuid4()}"))'
             )
+            # Name the stub's far end: same-net stubs and copper islands join
+            # electrically BY NAME, so a stub whose attachment misses the
+            # traced copper by a hair still lands on the right net (and ERC
+            # sees a terminated, named endpoint instead of a dangle).
+            name = net_display_name(net)
+            if name and (name, att_x, att_y) not in labeled_points:
+                labeled_points.add((name, att_x, att_y))
+                items.append(
+                    _global_label_sexpr(name, att_x * PT_TO_MM, att_y * PT_TO_MM)
+                )
     return lib_defs, items, mapped
+
+
+def _memberships_without_attachment(
+    graph: dict[str, Any], page_no: int
+) -> dict[str, list[dict[str, Any]]]:
+    """Component id -> nets it belongs to with NO geometric attachment."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for net in graph.get("nets") or []:
+        if not isinstance(net, dict) or net.get("page") not in (None, page_no):
+            continue
+        for node in net.get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            comp_id = str(node.get("component") or "")
+            if comp_id and not node.get("attachment"):
+                out.setdefault(comp_id, []).append(net)
+    return out
 
 
 def _attachments_by_component(
     graph: dict[str, Any], page_no: int
-) -> dict[str, list[tuple[float, float]]]:
-    out: dict[str, list[tuple[float, float]]] = {}
+) -> dict[str, list[tuple[float, float, dict[str, Any]]]]:
+    """Component id -> [(x_pt, y_pt, owning net), …] for one page."""
+    out: dict[str, list[tuple[float, float, dict[str, Any]]]] = {}
     for net in graph.get("nets") or []:
         if not isinstance(net, dict) or net.get("page") not in (None, page_no):
             continue
@@ -272,7 +374,7 @@ def _attachments_by_component(
             comp_id = str(node.get("component") or "")
             if comp_id and isinstance(attachment, (list, tuple)) and len(attachment) == 2:
                 out.setdefault(comp_id, []).append(
-                    (float(attachment[0]), float(attachment[1]))
+                    (float(attachment[0]), float(attachment[1]), net)
                 )
     return out
 
@@ -317,7 +419,15 @@ def _sim_safe_value(component: dict[str, Any], symbol_name: str) -> str:
     part = str(component.get("partNumber") or "").strip()
     if part:
         return re.sub(r"\s+", "_", part)
-    return symbol_name
+    # No printed value: type-typical placeholder (SAME defaults the SPICE
+    # emitter flags as ASSUMED) — the bare symbol letter ("C") would parse
+    # as a broken element value in KiCad's simulator.
+    return _SIM_PLACEHOLDER_VALUES.get(symbol_name, symbol_name)
+
+
+#: Placeholder Values for unlabeled primitives, mirroring spice.py's
+#: ``_PRIMITIVE_DEFAULTS`` so the KiCad simulator and the .run.cir agree.
+_SIM_PLACEHOLDER_VALUES = {"R": "10k", "C": "100n", "L": "1m"}
 
 
 def _instance_sexpr(
@@ -330,6 +440,7 @@ def _instance_sexpr(
     pins: list[tuple[str, float, float, float]],
     sheet_uuid: str,
     extra_properties: list[tuple[str, str]] | None = None,
+    exclude_from_sim: bool = False,
 ) -> str:
     def esc(text: str) -> str:
         return text.replace("\\", "\\\\").replace('"', '\\"')
@@ -343,9 +454,10 @@ def _instance_sexpr(
         f"      (effects (font (size 1.27 1.27)) (hide yes)))\n"
         for key, val in extra_properties or []
     )
+    sim_flag = "yes" if exclude_from_sim else "no"
     return (
         f'  (symbol (lib_id "{esc(lib_id)}") (at {_fmt(x)} {_fmt(y)} 0) (unit 1)\n'
-        f"    (exclude_from_sim no) (in_bom yes) (on_board yes) (dnp no)\n"
+        f"    (exclude_from_sim {sim_flag}) (in_bom yes) (on_board yes) (dnp no)\n"
         f'    (uuid "{uuid.uuid4()}")\n'
         f'    (property "Reference" "{esc(reference)}" (at {_fmt(x)} {_fmt(y - 3)} 0)\n'
         f"      (effects (font (size 1.27 1.27))))\n"
@@ -363,12 +475,133 @@ def _instance_sexpr(
     )
 
 
+def simulation_stimulus_items(
+    graph: dict[str, Any],
+    library: SymbolLibrary,
+    *,
+    sheet_uuid: str,
+    page_height_pt: float,
+) -> tuple[dict[str, str], list[str], list[str]]:
+    """Pressing RUN in KiCad's simulator must just work.
+
+    Places one ``Simulation_SPICE:VDC`` source per auto-detected supply rail
+    (tied to the rail by a same-name global label, negative pin on a GND
+    power symbol) plus the ``.op`` analysis card and the floating-node
+    rshunt as SPICE-directive text — the exact stimulus the published
+    ``.run.cir`` carries, so both simulate identically. Sources sit in a row
+    under the drawing. Returns ``(lib_defs, items, notes)``.
+    """
+    from docling_serve.schematic.spice_simulation import (
+        _DEFAULT_VOLTS_BY_KIND,
+        classify_schematic,
+        detect_power_nets,
+    )
+
+    supplies, _grounds = detect_power_nets(graph)
+    if not supplies:
+        return {}, [], ["kicad_sim_stimulus: no supply nets detected"]
+    loaded_vdc = library.load("Simulation_SPICE", "VDC")
+    loaded_gnd = library.load("power", "GND")
+    if loaded_vdc is None or loaded_gnd is None:
+        return {}, [], ["kicad_sim_stimulus: Simulation_SPICE/power libs unavailable"]
+    vdc_def, vdc_pins = loaded_vdc
+    gnd_def, _gnd_pins = loaded_gnd
+
+    default_volts = _DEFAULT_VOLTS_BY_KIND[classify_schematic(graph).kind]
+    nets_by_id = {
+        str(n.get("id")): n for n in graph.get("nets") or [] if isinstance(n, dict)
+    }
+    lib_defs = {"Simulation_SPICE:VDC": vdc_def, "power:GND": gnd_def}
+    items: list[str] = []
+    row_y = round(page_height_pt * PT_TO_MM - 18.0, 2)
+    placed = 0
+    seen_names: set[str] = set()
+    for supply in supplies:
+        net = nets_by_id.get(str(supply.get("net")))
+        name = net_display_name(net or {})
+        if not name or name in seen_names:
+            continue
+        seen_names.add(name)
+        x = 20.0 + placed * 26.0
+        placed += 1
+        # Pin "+" ties to the rail via a same-name global label; pin "-"
+        # lands on a GND power symbol pin (KiCad nets it as node 0).
+        plus = next((p for p in vdc_pins if p[0] in ("1", "+")), vdc_pins[0])
+        minus = next((p for p in vdc_pins if p[0] in ("2", "-")), vdc_pins[-1])
+        items.append(
+            _instance_sexpr(
+                "Simulation_SPICE:VDC",
+                reference=f"VSIM{placed}",
+                value=str(supply.get("volts") if supply.get("volts") is not None else default_volts),
+                x=x,
+                y=row_y,
+                pins=vdc_pins,
+                sheet_uuid=sheet_uuid,
+            )
+        )
+        items.append(
+            _global_label_sexpr(name, x + plus[1], row_y - plus[2])
+        )
+        items.append(
+            _instance_sexpr(
+                "power:GND",
+                reference=f"#PWRSIM{placed}",
+                value="GND",
+                x=x + minus[1],
+                y=row_y - minus[2],
+                pins=[("1", 0.0, 0.0, 0.0)],
+                sheet_uuid=sheet_uuid,
+            )
+        )
+    if not placed:
+        return {}, [], ["kicad_sim_stimulus: no nameable supply nets"]
+    # SPICE directives as sheet text — KiCad's simulator reads dot-commands
+    # from text items, giving RUN a job and the matrix a floating-node guard.
+    items.append(
+        f'  (text ".op\\n.options rshunt=1e9" (at 20 {_fmt(row_y + 10)} 0) '
+        f"(effects (font (size 2 2)) (justify left bottom)) "
+        f'(uuid "{uuid.uuid4()}"))'
+    )
+    return lib_defs, items, [f"kicad_sim_stimulus: {placed} source(s), .op card"]
+
+
 def embed_lib_symbols(kicad_text: str, lib_defs: dict[str, str]) -> str:
-    """Embed used library symbol definitions into ``(lib_symbols)``."""
+    """Embed used library symbol definitions into ``(lib_symbols)``.
+
+    Merges: a revised document already carries a populated section from the
+    previous injection, and a definition that fails to land leaves its
+    instances with all pins collapsed at the symbol origin (KiCad renders
+    ``???`` pins) — so defs must append into the EXISTING section, skipping
+    names already present.
+    """
     if not lib_defs:
         return kicad_text
-    body = "\n".join(_indent(defn, "    ") for defn in lib_defs.values())
-    return kicad_text.replace("  (lib_symbols)", f"  (lib_symbols\n{body}\n  )", 1)
+    start = kicad_text.find("(lib_symbols")
+    if start == -1:
+        return kicad_text
+    # Balanced scan for the section's closing paren.
+    depth = 0
+    end = len(kicad_text)
+    for index in range(start, len(kicad_text)):
+        if kicad_text[index] == "(":
+            depth += 1
+        elif kicad_text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                end = index
+                break
+    section = kicad_text[start:end]
+    missing = {
+        name: defn
+        for name, defn in lib_defs.items()
+        if f'(symbol "{name}"' not in section
+    }
+    if not missing:
+        return kicad_text
+    body = "\n".join(_indent(defn, "    ") for defn in missing.values())
+    if section.rstrip() == "(lib_symbols":  # empty self-closing form
+        return kicad_text[:start] + f"(lib_symbols\n{body}\n  " + kicad_text[end:]
+    return kicad_text[:end] + f"\n{body}\n  " + kicad_text[end:]
 
 
 def _indent(block: str, pad: str) -> str:

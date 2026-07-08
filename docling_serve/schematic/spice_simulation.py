@@ -68,18 +68,23 @@ _KIND_VOTES: dict[str, tuple[int, tuple[str, ...]]] = {
 }
 
 #: Net-name patterns that mark a DC supply, with how to read its voltage.
-_SUPPLY_RE = re.compile(r"(?:^|[^A-Z0-9])(\+?(\d+(?:\.\d+)?)\s*V(?:DC)?)(?:[^A-Z0-9]|$)", re.IGNORECASE)
+_SUPPLY_RE = re.compile(r"(?:^|[^A-Z0-9])([+-]?(\d+(?:\.\d+)?)\s*V(?:DC|AC)?)(?:[^A-Z0-9]|$)", re.IGNORECASE)
 _SUPPLY_NAME_RE = re.compile(r"^(VCC|VDD|VBUS|VBAT|V\+|\+V|PWR|POWER)$", re.IGNORECASE)
-_GROUND_NAME_RE = re.compile(r"^(GND|GROUND|VSS|CHASSIS|EARTH|COM|COMMON|0V|RETURN)$", re.IGNORECASE)
-#: MIL-W-5088 aircraft wire codes: the trailing N segment marks a ground wire.
-_MIL_GROUND_WIRE_RE = re.compile(r"^[A-Z0-9]+N$", re.IGNORECASE)
 
-_DEFAULT_VOLTS_BY_KIND = {
-    "electromechanical-power": 28.0,  # MIL-STD-704 28 V DC bus
-    "digital-logic": 5.0,
-    "analog-mixed": 5.0,
-    "unknown": 5.0,
-}
+def _default_volts_by_kind() -> dict[str, float]:
+    """Rail-voltage defaults by circuit kind, from the tuning config."""
+    from docling_serve.schematic.schematic_tuning import TUNING
+
+    return {
+        "electromechanical-power": TUNING.default_volts_electromechanical,
+        "digital-logic": TUNING.default_volts_digital,
+        "analog-mixed": TUNING.default_volts_analog,
+        "unknown": TUNING.default_volts_digital,
+    }
+
+
+#: Backward-compatible mapping (resolved once); prefer _default_volts_by_kind().
+_DEFAULT_VOLTS_BY_KIND = _default_volts_by_kind()
 
 
 @dataclass
@@ -161,24 +166,34 @@ def detect_power_nets(
     ``+5V``) or a conventional rail name (``VCC`` → kind-default volts).
     Grounds: conventional names plus MIL-W-5088 ``…N`` wire ids.
     """
+    from docling_serve.schematic.spice import is_ground_net
+
     supplies: list[dict[str, Any]] = []
     grounds: list[str] = []
     for net in graph.get("nets") or []:
         if not isinstance(net, dict):
             continue
         net_id = str(net.get("id") or "")
+        if is_ground_net(net):
+            grounds.append(net_id)
+            continue
         for candidate in (net.get("name"), net.get("wireId")):
             text = str(candidate or "").strip()
             if not text:
                 continue
-            if _GROUND_NAME_RE.match(text) or _MIL_GROUND_WIRE_RE.match(text):
-                grounds.append(net_id)
-                break
             voltage_hit = _SUPPLY_RE.search(text)
             if voltage_hit:
-                supplies.append(
-                    {"net": net_id, "name": text, "volts": float(voltage_hit.group(2))}
-                )
+                # The SIGN is part of the rail identity: a -13 VDC rail
+                # sourced at +13 V solves the wrong circuit. AC rails are
+                # energized at their nominal amplitude as DC — a stated
+                # approximation for the operating-point solve.
+                volts = float(voltage_hit.group(2))
+                if voltage_hit.group(1).lstrip().startswith("-"):
+                    volts = -volts
+                supply: dict[str, Any] = {"net": net_id, "name": text, "volts": volts}
+                if "VAC" in text.upper().replace(" ", ""):
+                    supply["ac"] = True
+                supplies.append(supply)
                 break
             if _SUPPLY_NAME_RE.match(text):
                 supplies.append({"net": net_id, "name": text, "volts": None})
@@ -291,15 +306,55 @@ def _most_connected_net(
 
 
 def _spice_node(graph: dict[str, Any], net_id: str) -> str:
-    """The SPICE node name the exporter assigns to a net (same sanitizer)."""
+    """The SPICE node name the exporter assigns to a net.
 
-    # The exporter derives node names per net in order; rebuild the mapping.
-    nets = [n for n in graph.get("nets") or [] if isinstance(n, dict)]
-    for index, net in enumerate(nets, start=1):
-        if str(net.get("id")) == net_id:
-            raw = net.get("name") or net.get("wireId") or f"N{index:03d}"
-            return re.sub(r"[^A-Za-z0-9_]", "_", str(raw).strip()).strip("_") or "X"
-    return net_id
+    Delegates to the exporter's own :func:`net_node_names` — one mapping,
+    shared, so stimulus sources always land on emitted node names (including
+    ground nets collapsed to ``0`` and polarity-preserving sanitization).
+    """
+    from docling_serve.schematic.spice import net_node_names
+
+    return net_node_names(graph).get(net_id, net_id)
+
+
+def runnable_deck(netlist: str, graph: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """A runnable ``.op`` deck from a structural netlist, fully auto-sourced.
+
+    The SAME classification + supply/ground detection the ``/simulate`` action
+    uses, packaged for anything that needs a deck that can actually solve: the
+    delivery-check SPICE gate and the published ``.run.cir`` artifact. Returns
+    ``(deck, info)`` where ``info`` carries ``classification``, ``supplies``,
+    ``grounds`` and ``warnings``.
+    """
+    classification = classify_schematic(graph)
+    supplies, grounds = detect_power_nets(graph)
+    warnings: list[str] = []
+    default_volts = _DEFAULT_VOLTS_BY_KIND[classification.kind]
+    for supply in supplies:
+        if supply["volts"] is None:
+            supply["volts"] = default_volts
+            supply["assumed"] = True
+        if supply.get("ac"):
+            warnings.append(
+                f"AC rail {supply['name']!r} energized at nominal amplitude as DC"
+                " for the operating-point solve"
+            )
+    if not supplies:
+        warnings.append("no supply net detected — operating point is trivial")
+    if not grounds:
+        ground_id = _most_connected_net(graph, exclude={s["net"] for s in supplies})
+        if ground_id is not None:
+            grounds = [ground_id]
+            warnings.append(
+                f"no ground net detected; using the most-connected net {ground_id} as reference"
+            )
+    deck = _build_deck(netlist, graph, supplies=supplies, grounds=grounds)
+    return deck, {
+        "classification": classification,
+        "supplies": supplies,
+        "grounds": grounds,
+        "warnings": warnings,
+    }
 
 
 def _build_deck(

@@ -1,0 +1,39 @@
+{
+  "drawing": "Figure 3-2",
+  "sourcePdf": "Figure 3-2.pdf",
+  "kind": "analog-power",
+  "notes": "USAF avionics multi-output power supply (PS1) with isolation transformer. Expert review ground truth: the drawing contains NO capacitor symbols - the two-bar vs three-bar glyph confusion invented filter capacitors where the drawing has ground symbols. Ground-glyph count is genuinely ambiguous (chassis + per-output signal grounds), so it carries wide tolerance; capacitors are FORBIDDEN.",
+  "componentsByFamily": {
+    "power supply": 1,
+    "resistor": 3,
+    "off-page": 4,
+    "ground": 6,
+    "connector": 3
+  },
+  "componentTolerance": {
+    "power supply": 1,
+    "off-page": 2,
+    "ground": 4,
+    "connector": 3
+  },
+  "forbiddenFamilies": {
+    "capacitor": 0,
+    "inductor": 0,
+    "transistor": 0,
+    "diode": 0
+  },
+  "namedNets": [
+    "+13 VDC",
+    "-13 VDC",
+    "B+",
+    "B-",
+    "SIG GND",
+    "26 VAC",
+    "230 VAC 400 Hz INPUT",
+    "CHASSIS GROUND"
+  ],
+  "minNamedNetCoverage": 0.75,
+  "minComponentScore": 0.6,
+  "minVerifiedFraction": 0.5,
+  "minOverall": 0.6
+}

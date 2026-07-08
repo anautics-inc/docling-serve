@@ -236,6 +236,35 @@ def _touches(p1: _WirePiece, p2: _WirePiece) -> bool:
     )
 
 
+def _is_enclosure_outline(a: Pt, b: Pt, boxes: list[ComponentBox]) -> bool:
+    """Does ``a→b`` run ALONG a large box's edge (not across, not inside)?
+
+    A segment hugging a LARGE component's bbox edge is that component's drawn
+    enclosure outline (the box around a power-supply module, an IC block, a
+    brace) — artwork, never a wire. Tracing it invents loop nets that
+    "connect" unrelated parts. Thresholds come from the tuning config.
+    """
+    from docling_serve.schematic.schematic_tuning import TUNING
+
+    hug = TUNING.outline_hug_pt
+    min_box = TUNING.outline_min_box_pt
+    for box in boxes:
+        if (box.x1 - box.x0) < min_box and (box.y1 - box.y0) < min_box:
+            continue
+        for edge_a, edge_b in (
+            ((box.x0, box.y0), (box.x1, box.y0)),
+            ((box.x0, box.y1), (box.x1, box.y1)),
+            ((box.x0, box.y0), (box.x0, box.y1)),
+            ((box.x1, box.y0), (box.x1, box.y1)),
+        ):
+            if (
+                _point_segment_distance(a, edge_a, edge_b) <= hug
+                and _point_segment_distance(b, edge_a, edge_b) <= hug
+            ):
+                return True
+    return False
+
+
 def _wire_pieces(
     polylines: list[list[Pt]], boxes: list[ComponentBox]
 ) -> list[_WirePiece]:
@@ -244,6 +273,8 @@ def _wire_pieces(
     for polyline in polylines:
         for a, b in pairwise(polyline):
             if math.dist(a, b) < 1e-9:
+                continue
+            if _is_enclosure_outline(a, b, boxes):
                 continue
             for start, end, touched in _clip_segment(a, b, boxes):
                 pieces.append(_WirePiece(a=start, b=end, touched=set(touched)))

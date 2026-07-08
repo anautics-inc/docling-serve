@@ -128,8 +128,31 @@ USER_PROMPT = (
     "as printed on THIS drawing. Do not substitute part numbers you associate "
     "with the device from prior knowledge — if the print is illegible, use "
     "null and add a warning.\n"
+    "- GLYPH DISCIPLINE — the classic confusions, resolve them by looking:\n"
+    "  * GROUND symbol: a wire ENDS in 2-4 stacked horizontal bars of "
+    "DECREASING width (or a triangle/rake). One wire enters, nothing leaves. "
+    "It is NOT a capacitor. List it under groundPoints, not components.\n"
+    "  * CAPACITOR: exactly two EQUAL-length parallel plates IN SERIES with "
+    "a wire — a wire enters one plate AND a wire leaves the other. No "
+    "through-wire on both sides means it is not a capacitor.\n"
+    "  * TRANSFORMER WINDINGS: repeated semicircular bumps along a line "
+    "(often beside parallel dashed core bars) are ONE transformer, not many "
+    "capacitors or inductors. Emit a single transformer component whose pins "
+    "are the winding terminals and taps, and add a warning if the internal "
+    "winding-to-terminal mapping is uncertain.\n"
+    "- A parenthesized numeral next to a symbol — like (2) — is a QUANTITY "
+    "annotation on that symbol, never a component and never a value.\n"
+    "- Off-page continuations (arrow flags, braces with text like 'FROM A1 "
+    'MODULE\', "TO ...") are real endpoints: emit each as a component of '
+    'type "off-page" named by its printed text, and connect its net to it.\n'
+    "- Count check before answering: if the drawing prints no capacitor "
+    "values and no capacitor refDes anywhere, be suspicious of every "
+    "capacitor you think you see — re-examine it against the ground and "
+    "transformer rules above.\n"
     "- If something is illegible or ambiguous, add a short string to warnings "
-    "rather than guessing."
+    "rather than guessing. NEVER resolve ambiguity by inventing a plausible "
+    "component — an omitted-with-warning symbol is recoverable, an invented "
+    "one poisons every downstream artifact."
 )
 
 # Dedicated detection pass. The main pass reads the whole drawing and its
@@ -158,7 +181,13 @@ DETECT_USER_PROMPT = (
     "- Include EVERY instance, even dozens of repeated identical symbols. "
     "Completeness matters more than classification accuracy.\n"
     "- Do NOT include wires, junction dots, net labels, ground/power rail "
-    "symbols, or the title block."
+    "symbols, or the title block.\n"
+    "- A wire ending in stacked horizontal bars of DECREASING width is a "
+    "GROUND symbol — excluded. A capacitor has two EQUAL parallel plates "
+    "with a wire on BOTH sides. Semicircular bumps along a line are one "
+    "transformer/inductor winding, not a row of capacitors.\n"
+    "- A parenthesized numeral like (2) is a quantity annotation, not a "
+    "component."
 )
 
 #: Detection boxes overlapping an existing component box by at least this IoU
@@ -413,32 +442,59 @@ class SchematicExtractor(Extractor):
         xml_path.write_text(xml_text)
         artifacts.append(xml_path.relative_to(ctx.bundle_dir).as_posix())
 
+        # Native EEvision database (ready to load — no edml2edb compile step).
+        # Optional: needs the vendor's EDB Creator API (EEVISION_PEDB_DIR).
+        edb_rel: str | None = None
+        try:
+            from docling_serve.schematic.edb import graph_to_edb
+
+            edb_path = schematic_dir / f"{ctx.source_path.stem}.edb"
+            edb_stats = graph_to_edb(graph, edb_path, source_name=ctx.source_path.name)
+            edb_rel = edb_path.relative_to(ctx.bundle_dir).as_posix()
+            artifacts.append(edb_rel)
+            notes.append(f"edb: written ({edb_stats})")
+        except Exception as edb_error:  # EdbCreatorUnavailable or vendor-lib failure
+            notes.append(f"edb: unavailable ({edb_error})")
+
         kbl_text = graph_to_kbl(graph, source_name=ctx.source_path.name)
         kbl_path = schematic_dir / f"{ctx.source_path.stem}.kbl"
         kbl_path.write_text(kbl_text)
         artifacts.append(kbl_path.relative_to(ctx.bundle_dir).as_posix())
-        # Validate against the official VDA KBL 2.4 SR-1 XSD at export time and
-        # record the verdict on the bundle — formal standard targeting.
-        kbl_schema_valid: bool | None = None
-        try:
-            from docling_serve.schematic.schematic_revision import check_kbl
-
-            kbl_verdict = check_kbl(kbl_path)
-            if kbl_verdict.status in ("pass", "fail"):
-                kbl_schema_valid = kbl_verdict.status == "pass"
-            notes.append(f"kbl_validation: {kbl_verdict.status} ({kbl_verdict.detail})")
-        except Exception as error:  # pragma: no cover - lxml/xsd availability
-            notes.append(f"kbl_validation: unavailable ({error})")
 
         spice_text = graph_to_spice(graph, source_name=ctx.source_path.name)
         spice_path = schematic_dir / f"{ctx.source_path.stem}.cir"
         spice_path.write_text(spice_text)
         artifacts.append(spice_path.relative_to(ctx.bundle_dir).as_posix())
 
+        # The RUNNABLE deck: same netlist with auto-detected supplies/grounds
+        # and an .op card — `ngspice -b <stem>.run.cir` solves it as shipped,
+        # no manual source editing. This is the deliverable the SPICE gate
+        # below proves.
+        from docling_serve.schematic.spice_simulation import runnable_deck
+
+        run_deck, run_info = runnable_deck(spice_text, graph)
+        spice_run_path = schematic_dir / f"{ctx.source_path.stem}.run.cir"
+        spice_run_path.write_text(run_deck)
+        artifacts.append(spice_run_path.relative_to(ctx.bundle_dir).as_posix())
+        notes.extend(f"spice_runnable: {w}" for w in run_info["warnings"])
+
         # Traced nets become REAL electrical (wire ...) objects in the KiCad
         # documents — without this a scanned page opens in KiCad as a picture
         # with zero wires, and even vector pages carry only graphic polylines.
         _inject_net_wires(kicad_sch_paths, graph, notes)
+
+        # Sibling .kicad_pro per document: carries the generated-document ERC
+        # policy so KiCad (ours and the user's) applies the same severities.
+        from docling_serve.schematic.kicad_sch import write_project_files
+
+        kicad_pro_paths = write_project_files(kicad_sch_paths)
+        for pro_path in kicad_pro_paths:
+            artifacts.append(pro_path.relative_to(ctx.bundle_dir).as_posix())
+        kicad_pro_rel = (
+            kicad_pro_paths[0].relative_to(ctx.bundle_dir).as_posix()
+            if kicad_pro_paths
+            else None
+        )
 
         # Multi-page drawings additionally get a hierarchy ROOT document
         # linking every page as a KiCad sheet, so the whole drawing opens as
@@ -468,6 +524,30 @@ class SchematicExtractor(Extractor):
             p.relative_to(ctx.bundle_dir).as_posix() for p in kicad_render_paths
         )
 
+        # Delivery-check the model NOW, while every artifact is on disk —
+        # "usable at extraction completion" means the acceptance verdict ships
+        # WITH the bundle, not after a human clicks a button. The persisted
+        # report (checks + passed + checkedAt) lands on the manifest below;
+        # a later revise refreshes it.
+        ctx.report_progress("schematic_delivery_check")
+        from docling_serve.schematic.schematic_revision import (
+            check_report_dict,
+            run_delivery_checks,
+        )
+
+        check_report: dict[str, Any] | None = None
+        kbl_schema_valid: bool | None = None
+        try:
+            check_results = run_delivery_checks(graph, schematic_dir)
+            check_report = check_report_dict(check_results, graph)
+            kbl_verdict = next((c for c in check_results if c.id == "kbl"), None)
+            if kbl_verdict is not None and kbl_verdict.status in ("pass", "fail"):
+                kbl_schema_valid = kbl_verdict.status == "pass"
+            summary = ", ".join(f"{c.id}={c.status}" for c in check_results)
+            notes.append(f"delivery_check: {summary}")
+        except Exception as error:  # pragma: no cover - tool-environment dependent
+            notes.append(f"delivery_check: unavailable ({error})")
+
         kicad_root_rel = (
             kicad_root_path.relative_to(ctx.bundle_dir).as_posix()
             if kicad_root_path
@@ -482,9 +562,13 @@ class SchematicExtractor(Extractor):
             "netlist": netlist_path.relative_to(ctx.bundle_dir).as_posix(),
             "edml": edml_path.relative_to(ctx.bundle_dir).as_posix(),
             "eevisionCsv": eevision_path.relative_to(ctx.bundle_dir).as_posix(),
+            "edb": edb_rel,
             "xml": xml_path.relative_to(ctx.bundle_dir).as_posix(),
             "kbl": kbl_path.relative_to(ctx.bundle_dir).as_posix(),
             "spice": spice_path.relative_to(ctx.bundle_dir).as_posix(),
+            "spiceRunnable": spice_run_path.relative_to(ctx.bundle_dir).as_posix(),
+            "kicadPro": kicad_pro_rel,
+            "check": check_report,
             "kicadRender": [
                 p.relative_to(ctx.bundle_dir).as_posix() for p in kicad_render_paths
             ],
@@ -511,9 +595,13 @@ class SchematicExtractor(Extractor):
                     "netlist": netlist_path.relative_to(ctx.bundle_dir).as_posix(),
                     "edml": edml_path.relative_to(ctx.bundle_dir).as_posix(),
                     "eevisionCsv": eevision_path.relative_to(ctx.bundle_dir).as_posix(),
+                    "edb": edb_rel,
                     "xml": xml_path.relative_to(ctx.bundle_dir).as_posix(),
                     "kbl": kbl_path.relative_to(ctx.bundle_dir).as_posix(),
                     "spice": spice_path.relative_to(ctx.bundle_dir).as_posix(),
+                    "spiceRunnable": spice_run_path.relative_to(ctx.bundle_dir).as_posix(),
+                    "kicadPro": kicad_pro_rel,
+                    "check": check_report,
                     "kicadRender": [
                         p.relative_to(ctx.bundle_dir).as_posix()
                         for p in kicad_render_paths
@@ -610,11 +698,55 @@ def _enrich_connectivity(
     from docling_serve.schematic.connectivity_ids import (
         assign_two_terminal_pins,
         assign_wire_ids,
+        drop_quantity_annotations,
+        drop_value_text_echoes,
+        mark_ground_nets,
+        merge_duplicate_detections,
+        reattach_floating_components,
     )
     from docling_serve.schematic.pin_identification import (
         assign_pins_from_text,
         assign_pins_with_vision,
     )
+
+    # Reconciliation BEFORE anything trusts the component list: the two
+    # recognition passes must agree on one component per glyph, annotation
+    # text must not masquerade as parts, and ambiguous glyphs get settled by
+    # LOOKING (crop query), never by plausibility.
+    for note_tag, pass_notes in (
+        ("dedup", merge_duplicate_detections(graph)),
+        ("quantity_cleanup", drop_quantity_annotations(graph)),
+        ("echo_cleanup", drop_value_text_echoes(graph)),
+    ):
+        if pass_notes:
+            notes.append(f"{note_tag}: {'; '.join(pass_notes[:10])}")
+
+    if provider.enabled and page_images:
+        from docling_serve.schematic.component_identity import (
+            disambiguate_capacitor_glyphs,
+        )
+
+        ctx.report_progress("schematic_glyph_check")
+        glyph_notes = disambiguate_capacitor_glyphs(
+            graph,
+            page_images,
+            understand=lambda prompt, system, png: _cached_understand_json(
+                provider, prompt=prompt, system=system, png_bytes=png
+            )[0],
+            source_path=ctx.resolve_source_file(),
+        )
+        if glyph_notes:
+            notes.append(f"glyph_check: {'; '.join(glyph_notes[:10])}")
+
+    # Evidence-backed repair AFTER reconciliation: components the tracer left
+    # floating rejoin nets named by their own extracted text or terminated by
+    # a traced wire ending on their box. Provenance-marked, QA-visible.
+    reattached = reattach_floating_components(graph)
+    if reattached:
+        notes.append(f"reattach: {'; '.join(reattached[:12])}")
+    grounded = mark_ground_nets(graph)
+    if grounded:
+        notes.append(f"ground_classes: {grounded} net(s) classified from glyphs")
 
     wire_ids = assign_wire_ids(graph)
     pin_count = assign_two_terminal_pins(graph)
@@ -1367,15 +1499,41 @@ def _inject_net_wires(
             # KiCad symbols (Device:R, Switch:SW_SPST, …) with stub wires to
             # their traced attachment points — what ERC and the SPICE
             # netlister operate on.
+            sheet_uuid = document_sheet_uuid(text)
             lib_defs, symbol_items, mapped = build_symbol_instances(
                 graph,
                 page_no=page_index,
-                sheet_uuid=document_sheet_uuid(text),
+                sheet_uuid=sheet_uuid,
                 library=library,
             )
-            text = embed_lib_symbols(text, lib_defs)
             items += symbol_items
             total["symbols"] += mapped
+            if page_index == 1:
+                # Auto-detected supplies + .op card ON the sheet: the KiCad
+                # simulator's RUN button then solves the same model as the
+                # published .run.cir, no manual source wiring.
+                from docling_serve.schematic.kicad_symbols import (
+                    simulation_stimulus_items,
+                )
+
+                page_height = next(
+                    (
+                        float(p.get("height"))
+                        for p in graph.get("pages") or []
+                        if isinstance(p, dict) and p.get("height")
+                    ),
+                    792.0,
+                )
+                sim_defs, sim_items, sim_notes = simulation_stimulus_items(
+                    graph,
+                    library,
+                    sheet_uuid=sheet_uuid,
+                    page_height_pt=page_height,
+                )
+                lib_defs.update(sim_defs)
+                items += sim_items
+                notes.extend(sim_notes)
+            text = embed_lib_symbols(text, lib_defs)
         if items:
             kicad_path.write_text(inject_items(text, items))
         total["wires"] += len(wires)
@@ -1407,6 +1565,9 @@ def _render_kicad_previews(
     if not _shutil.which("kicad-cli"):
         notes.append("kicad_render_unavailable: kicad-cli not installed")
         return []
+    from docling_serve.schematic.kicad_symbols import ensure_kicad_cli_config
+
+    ensure_kicad_cli_config()
 
     renders: list[Path] = []
     for index, sch_path in enumerate(kicad_sch_paths, start=1):

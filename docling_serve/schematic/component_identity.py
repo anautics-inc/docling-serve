@@ -213,6 +213,209 @@ def recover_component_identity(
     return filled
 
 
+GLYPH_SYSTEM_PROMPT = (
+    "You are a meticulous electrical-schematic glyph inspector. You classify "
+    "exactly what a cropped symbol IS by its geometry, never by what would be "
+    "plausible in the circuit. You always answer with a single valid JSON "
+    "object and nothing else."
+)
+
+GLYPH_USER_PROMPT = (
+    "This crop is centered on ONE schematic symbol. Classify the CENTERED "
+    "symbol only (ignore neighbors at the edges).\n"
+    '- ground: a wire ENDS at 2-4 stacked horizontal bars of DECREASING '
+    "width (or a triangle/rake). One wire in, nothing out the other side.\n"
+    "- capacitor: exactly two EQUAL-length parallel plates IN SERIES with a "
+    "wire — a wire enters one plate and a separate wire leaves the other.\n"
+    "- resistor: a rectangle or zigzag in series with a wire.\n"
+    "- inductor: a series of semicircular bumps / a coil in series with a "
+    "wire (NOT beside dashed core bars — that is a transformer).\n"
+    "- diode: a triangle pointing into a bar.\n"
+    "- transformer-winding: repeated bumps along a line beside parallel "
+    "dashed core bars (one winding of a multi-winding transformer).\n"
+    "- other: text, connector stubs, junction dots, anything else.\n"
+    'Return ONLY: {"kind": "ground"|"capacitor"|"resistor"|"inductor"|'
+    '"diode"|"transformer-winding"|"other", "confidence": number, '
+    '"reason": str}\n'
+    "Decide by GEOMETRY, not by what would be plausible in the circuit. "
+    "Equal bars = capacitor; shrinking bars = ground. If genuinely "
+    'unreadable, use "other" with low confidence.'
+)
+
+#: Families whose glyphs are morphologically confusable (the plate/bar/coil
+#: family) — value-less instances of these get a crop recheck. Others are
+#: rechecked only when the model flagged low per-component confidence.
+_CONFUSABLE_FAMILIES = ("capacitor", "inductor", "ground", "diode")
+#: A verdict "kind" that maps cleanly onto a component type we can retype to.
+_KIND_TO_TYPE = {
+    "ground": "ground",
+    "capacitor": "capacitor",
+    "resistor": "resistor",
+    "inductor": "inductor",
+    "diode": "diode",
+}
+
+
+def disambiguate_capacitor_glyphs(
+    graph: dict[str, Any],
+    page_images: list[tuple[int, bytes]],
+    *,
+    understand: Any,
+    source_path: Path | None = None,
+) -> list[str]:
+    """Re-inspect confusable glyphs by cropping and classifying by geometry.
+
+    The reviewed failure was ground glyphs (shrinking bars) read as
+    capacitors (equal plates), inventing filter caps and a SPICE circuit that
+    doesn't exist. That is one instance of a general problem — morphologically
+    similar symbols (plates/bars/coils/triangles) get confused — so this
+    rechecks EVERY value-less instance of a confusable family
+    (:data:`_CONFUSABLE_FAMILIES`) plus anything the model flagged with low
+    per-component confidence. The crop verdict retypes the component to the
+    geometry it actually shows, drops it when it is another symbol's artwork
+    (transformer winding) or an unconfirmable phantom, and — under
+    ``glyph_confirm_to_keep`` — a value-less capacitor survives only if the
+    crop positively confirms it. Returns notes.
+    """
+    from docling_serve.schematic.schematic_tuning import TUNING
+
+    act = TUNING.glyph_verdict_confidence
+    confirm_to_keep = TUNING.glyph_confirm_to_keep
+    png_by_page = dict(page_images)
+    hires = _HiResPages(source_path)
+
+    def _is_suspect(component: dict[str, Any]) -> bool:
+        if not component.get("bbox"):
+            return False
+        ctype = str(component.get("type") or "").lower()
+        has_value = bool(str(component.get("value") or "").strip())
+        family_hit = any(f in ctype for f in _CONFUSABLE_FAMILIES)
+        low_conf = (
+            isinstance(component.get("confidence"), (int, float))
+            and float(component["confidence"]) < 0.6
+        )
+        # Value-less confusable glyphs always; low-confidence anything.
+        return (family_hit and not has_value) or low_conf
+
+    suspects = [
+        c
+        for c in graph.get("components") or []
+        if isinstance(c, dict) and _is_suspect(c)
+    ]
+    notes: list[str] = []
+    delete_ids: set[str] = set()
+
+    def _purge(comp_id: str, *, all_memberships: bool = False) -> None:
+        """Drop this component's net memberships.
+
+        ``all_memberships`` removes EVERY membership (used when the component
+        itself is deleted, so no net is left referencing an absent id).
+        Otherwise only inference-derived memberships drop (a retype keeps the
+        component, so its geometric attachments remain valid).
+        """
+        for net in graph.get("nets") or []:
+            if isinstance(net, dict):
+                net["nodes"] = [
+                    node
+                    for node in net.get("nodes") or []
+                    if not (
+                        isinstance(node, dict)
+                        and str(node.get("component")) == comp_id
+                        and (
+                            all_memberships
+                            or node.get("membershipSource") == "description-inference"
+                        )
+                    )
+                ]
+
+    for component in suspects:
+        page_no = int(component.get("page") or 1)
+        page_size = _page_size_pt(graph, page_no)
+        if not page_size:
+            continue
+        hires_page = hires.page(page_no)
+        if hires_page is not None:
+            crop_png = _crop_from_image(hires_page, component, page_size)
+        else:
+            png_bytes = png_by_page.get(page_no)
+            crop_png = (
+                _crop_component(png_bytes, component, page_size) if png_bytes else None
+            )
+        if crop_png is None:
+            continue
+        try:
+            payload = understand(GLYPH_USER_PROMPT, GLYPH_SYSTEM_PROMPT, crop_png)
+        except Exception as error:  # a bad crop must never fail the job
+            _log.warning("Glyph crop failed for %s: %s", component.get("id"), error)
+            continue
+        if not isinstance(payload, dict):
+            continue
+        kind = str(payload.get("kind") or "").strip().lower()
+        confidence = float(payload.get("confidence") or 0)
+        reason = str(payload.get("reason"))[:60]
+        label = component.get("refDes") or component.get("id")
+        current = str(component.get("type") or "").lower()
+        current_family = next(
+            (f for f in _CONFUSABLE_FAMILIES if f in current), current
+        )
+
+        # 1) Confident retype to a different, recognizable family.
+        target = _KIND_TO_TYPE.get(kind)
+        if target and confidence >= act and target != current_family:
+            component["type"] = target
+            component["description"] = f"reclassified {current_family} -> {target}: {reason}"
+            # Membership evidence derived from the mis-read description is void
+            # (a ground wrongly on a rail would short it); geometric
+            # attachments survive the retype.
+            _purge(str(component.get("id")))
+            notes.append(f"{label}: {current_family} -> {target} ({confidence:.2f})")
+            continue
+
+        # 2) Confident "this is another symbol's artwork" -> remove.
+        if kind == "transformer-winding" and confidence >= act:
+            delete_ids.add(str(component.get("id")))
+            _purge(str(component.get("id")), all_memberships=True)
+            notes.append(f"{label}: {current_family} -> transformer artwork, removed")
+            continue
+
+        # 3) Confirm-to-keep: a value-less confusable glyph the crop does NOT
+        #    positively confirm as its current family is a phantom. Dropping
+        #    it is the reviewed stance — an invented part poisons artifacts,
+        #    an omitted one is recoverable from the QA worklist.
+        confirmed = kind == current_family and confidence >= act
+        if confirm_to_keep and not confirmed:
+            delete_ids.add(str(component.get("id")))
+            _purge(str(component.get("id")), all_memberships=True)
+            notes.append(
+                f"{label}: unconfirmed {current_family} removed ({kind} {confidence:.2f})"
+            )
+            continue
+
+        # 4) Kept but flagged for the human worklist.
+        if not confirmed:
+            component["reviewNote"] = (
+                f"glyph check inconclusive ({kind} {confidence:.2f}) — verify"
+            )
+            notes.append(f"{label}: inconclusive ({kind} {confidence:.2f})")
+    if delete_ids:
+        graph["components"] = [
+            c
+            for c in graph.get("components") or []
+            if str(c.get("id")) not in delete_ids
+        ]
+        for net in graph.get("nets") or []:
+            if isinstance(net, dict):
+                net["nodes"] = [
+                    node
+                    for node in net.get("nodes") or []
+                    if not (
+                        isinstance(node, dict)
+                        and str(node.get("component")) in delete_ids
+                    )
+                ]
+    return notes
+
+
 def reconcile_value_part_number(graph: dict[str, Any]) -> int:
     """Drop a ``value`` that contradicts a verified part number, in place.
 

@@ -43,6 +43,11 @@ def _build_ray_orchestrator(
         "eng_ray_max_page_slice_parallelism",
         max_page_slice_parallelism,
     )
+    # Pin the storage toggle: a developer .env with artifact storage enabled
+    # must not flip this test's "disabled" premise.
+    monkeypatch.setattr(
+        factory_module.docling_serve_settings, "artifact_storage_enabled", False
+    )
 
     with (
         patch(

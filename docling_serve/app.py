@@ -196,6 +196,14 @@ async def lifespan(app: FastAPI):
         )
     scratch_dir = get_scratch()
 
+    # The factory cache is process-global, but an orchestrator's asyncio
+    # primitives (jobkit 2.x creates its task queue eagerly) bind to the event
+    # loop that constructed them. A new app instance on a new loop — every
+    # test session after the first — would inherit a queue bound to a dead
+    # loop and its workers would crash on the first get(). One app start =
+    # one fresh orchestrator; in production (single startup per process) this
+    # is the first call anyway.
+    get_async_orchestrator.cache_clear()
     orchestrator = get_async_orchestrator()
     notifier = WebsocketNotifier(orchestrator)
     orchestrator.bind_notifier(notifier)
@@ -206,6 +214,12 @@ async def lifespan(app: FastAPI):
         await orchestrator.warm_up_caches()
 
     _models_ready.set()
+
+    # A fresh app instance starts healthy: the failure latch belongs to THIS
+    # instance's queue loop. Without the reset, a prior instance in the same
+    # process (test sessions create several) leaks its dead-loop flag into
+    # every later instance's readiness probes.
+    _queue_processor_failed.clear()
 
     # Start the background queue processor. If a supervised loop (RQ/Ray pub/sub
     # listener, Local workers) ever crashes, the done-callback flags the pod

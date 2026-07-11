@@ -81,11 +81,13 @@ def test_detection_frame_left_alone_when_aligned():
     main = [
         {"refDes": "R1", "bboxPt": [100.0, 100.0, 140.0, 120.0]},
         {"refDes": "R2", "bboxPt": [300.0, 200.0, 340.0, 220.0]},
+        {"refDes": "R3", "bboxPt": [200.0, 400.0, 240.0, 420.0]},
     ]
     detection = {
         "components": [
             {"refDes": "R1", "bboxPt": [101.0, 99.0, 141.0, 121.0]},
             {"refDes": "R2", "bboxPt": [299.0, 201.0, 339.0, 219.0]},
+            {"refDes": "R3", "bboxPt": [201.0, 399.0, 241.0, 421.0]},
         ]
     }
     before = [list(c["bboxPt"]) for c in detection["components"]]

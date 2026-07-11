@@ -1038,7 +1038,10 @@ def _reregister_detection_frame(
         main_bbox = main_by_ref.get(str(ref).strip().upper()) if ref else None
         if bbox and main_bbox:
             anchors.append((bbox, main_bbox))
-    if len(anchors) < 2:
+    # Two anchors make each per-axis fit exact by construction (zero residual
+    # even through a bad anchor), so the improvement check below would always
+    # pass — require three so a wrong anchor shows up as residual.
+    if len(anchors) < 3:
         return False
 
     def center(bbox: list[float]) -> tuple[float, float]:

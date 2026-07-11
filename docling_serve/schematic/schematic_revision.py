@@ -480,6 +480,7 @@ def _download_schematic_dir(
 
     paginator = client.get_paginator("list_objects_v2")
     schematic_prefix = f"{prefix}/schematic/"
+    resolved_target = target.resolve()
     for page in paginator.paginate(Bucket=bucket, Prefix=schematic_prefix):
         for obj in page.get("Contents") or []:
             key = obj["Key"]
@@ -487,6 +488,11 @@ def _download_schematic_dir(
             if not relative:
                 continue
             local = target / relative
+            # S3 keys may carry path-like segments; a key resolving outside
+            # the download directory is a traversal attempt, never a bundle
+            # artifact.
+            if not local.resolve().is_relative_to(resolved_target):
+                continue
             local.parent.mkdir(parents=True, exist_ok=True)
             client.download_file(bucket, key, str(local))
 

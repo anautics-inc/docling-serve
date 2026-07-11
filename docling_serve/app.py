@@ -185,6 +185,15 @@ def _supervise_queue_processor(task: asyncio.Task, failed_event: asyncio.Event) 
 # Context manager to initialize and clean up the lifespan of the FastAPI app
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not docling_serve_settings.api_key:
+        # Upstream semantics: an empty DOCLING_SERVE_API_KEY disables auth on
+        # every endpoint. Acceptable only for a loopback-bound dev instance —
+        # make the posture impossible to miss in the logs.
+        _log.warning(
+            "DOCLING_SERVE_API_KEY is not set: ALL endpoints accept "
+            "unauthenticated requests. Set an API key for any deployment "
+            "reachable beyond localhost."
+        )
     scratch_dir = get_scratch()
 
     orchestrator = get_async_orchestrator()
@@ -581,6 +590,48 @@ def create_app():  # noqa: C901
             f"(header_value: '{tenant_id_header}')"
         )
         return tenant_id
+
+    def _safe_upload_name(filename: str | None, fallback: str) -> str:
+        """Bare file name for an upload — never a path.
+
+        Client-supplied filenames name files inside per-request temp
+        directories; a name carrying path separators or ``..`` would escape
+        them (arbitrary file write as the service user). Reduce to the
+        basename; fall back when nothing safe remains.
+        """
+        from pathlib import PurePosixPath, PureWindowsPath
+
+        # Normalize both separator conventions before taking the basename.
+        name = PurePosixPath(PureWindowsPath(str(filename or "")).as_posix()).name
+        name = name.strip()
+        if not name or name in {".", ".."}:
+            return fallback
+        return name
+
+    def _checked_upload_size(data: bytes) -> bytes:
+        """Enforce the configured ``max_file_size`` on a direct upload."""
+        if len(data) > docling_serve_settings.max_file_size:
+            raise HTTPException(
+                status_code=413,
+                detail="Uploaded file exceeds the configured max_file_size.",
+            )
+        return data
+
+    def _validated_bundle_prefix(prefix: str) -> str:
+        """A caller-supplied S3 bundle prefix, validated against traversal.
+
+        Prefixes address bundle objects in S3 and, on check/revise, local
+        paths derived from those keys — reject rooted, backslash-carrying,
+        or dot-dot prefixes so a prefix can never step outside its keyspace.
+        Returns the cleaned prefix ('' stays '').
+        """
+        cleaned = prefix.strip().strip("/")
+        if not cleaned:
+            return ""
+        parts = cleaned.split("/")
+        if "\\" in cleaned or any(part in {"", ".", ".."} for part in parts):
+            raise HTTPException(status_code=422, detail="Invalid bundle prefix.")
+        return cleaned
 
     def _task_tenant_id(task: Task) -> str:
         """Return the tenant that owns a task, defaulting to 'default'."""
@@ -1115,12 +1166,12 @@ def create_app():  # noqa: C901
         if not files:
             raise HTTPException(status_code=422, detail="No file uploaded.")
         upload = files[0]
-        name = upload.filename or "database.mdb"
+        name = _safe_upload_name(upload.filename, "database.mdb")
         if not is_access_file(name):
             raise HTTPException(
                 status_code=422, detail="extract/access expects a .mdb or .accdb file."
             )
-        data = await upload.read()
+        data = _checked_upload_size(await upload.read())
         tmp_path: _Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -1181,10 +1232,11 @@ def create_app():  # noqa: C901
         if not files:
             raise HTTPException(status_code=422, detail="No file uploaded.")
         upload = files[0]
-        name = upload.filename or "form.pdf"
+        name = _safe_upload_name(upload.filename, "form.pdf")
         if not name.lower().endswith(".pdf"):
             raise HTTPException(status_code=422, detail="extract/form expects a .pdf file.")
-        data = await upload.read()
+        data = _checked_upload_size(await upload.read())
+        prefix = _validated_bundle_prefix(prefix)
         work = _Path(tempfile.mkdtemp(prefix="xfa-form-"))
         try:
             src = work / name
@@ -1296,12 +1348,13 @@ def create_app():  # noqa: C901
         if not files:
             raise HTTPException(status_code=422, detail="No file uploaded.")
         upload = files[0]
-        name = upload.filename or "to.pdf"
+        name = _safe_upload_name(upload.filename, "to.pdf")
         if not name.lower().endswith(".pdf"):
             raise HTTPException(
                 status_code=422, detail="extract/technical-order expects a .pdf file."
             )
-        data = await upload.read()
+        data = _checked_upload_size(await upload.read())
+        prefix = _validated_bundle_prefix(prefix)
         work = _Path(tempfile.mkdtemp(prefix="technical-order-"))
         try:
             src = work / name
@@ -1409,8 +1462,9 @@ def create_app():  # noqa: C901
         if not files:
             raise HTTPException(status_code=422, detail="No file uploaded.")
         upload = files[0]
-        name = upload.filename or "schematic.pdf"
-        data = await upload.read()
+        name = _safe_upload_name(upload.filename, "schematic.pdf")
+        data = _checked_upload_size(await upload.read())
+        prefix = _validated_bundle_prefix(prefix)
         tenant_id = _get_tenant_id_from_header(x_tenant_id)
         work = _Path(tempfile.mkdtemp(prefix="schematic-"))
         try:
@@ -1463,7 +1517,7 @@ def create_app():  # noqa: C901
         """
         from docling_serve.schematic.schematic_revision import check_schematic_bundle
 
-        prefix = str(body.get("prefix") or "").strip()
+        prefix = _validated_bundle_prefix(str(body.get("prefix") or ""))
         bucket = _schematic_bucket(body)
         if not (prefix and bucket):
             raise HTTPException(
@@ -1500,7 +1554,7 @@ def create_app():  # noqa: C901
         """
         from docling_serve.schematic.schematic_revision import revise_schematic_bundle
 
-        prefix = str(body.get("prefix") or "").strip()
+        prefix = _validated_bundle_prefix(str(body.get("prefix") or ""))
         bucket = _schematic_bucket(body)
         edits = body.get("edits")
         if not (prefix and bucket and isinstance(edits, dict)):
@@ -1543,7 +1597,7 @@ def create_app():  # noqa: C901
 
         from docling_serve.schematic.spice_simulation import simulate_graph
 
-        prefix = str(body.get("prefix") or "").strip().strip("/")
+        prefix = _validated_bundle_prefix(str(body.get("prefix") or ""))
         bucket = _schematic_bucket(body)
         if not (prefix and bucket):
             raise HTTPException(status_code=422, detail="prefix and a bucket are required.")

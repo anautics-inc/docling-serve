@@ -73,7 +73,12 @@ class SchematicTuning:
 
     @classmethod
     def from_env(cls) -> "SchematicTuning":
-        """Load defaults, overriding any field from ``SCHEMATIC_<FIELD>``."""
+        """Load defaults, overriding any field from ``SCHEMATIC_<FIELD>``.
+
+        Malformed values FAIL FAST with the offending variable named — a
+        typo'd override silently reverting to the default would change
+        extraction behavior without anyone noticing.
+        """
         overrides: dict[str, object] = {}
         for field in fields(cls):
             env_key = f"SCHEMATIC_{field.name.upper()}"
@@ -81,12 +86,20 @@ class SchematicTuning:
             if raw is None:
                 continue
             if field.type == "bool":
-                overrides[field.name] = raw.strip().lower() in ("1", "true", "yes")
+                normalized = raw.strip().lower()
+                if normalized in ("1", "true", "yes", "on"):
+                    overrides[field.name] = True
+                elif normalized in ("0", "false", "no", "off"):
+                    overrides[field.name] = False
+                else:
+                    raise ValueError(
+                        f"{env_key}={raw!r} is not a boolean (use true/false)"
+                    )
             else:
                 try:
                     overrides[field.name] = float(raw)
-                except ValueError:
-                    continue
+                except ValueError as err:
+                    raise ValueError(f"{env_key}={raw!r} is not a number") from err
         return cls(**overrides)  # type: ignore[arg-type]
 
 

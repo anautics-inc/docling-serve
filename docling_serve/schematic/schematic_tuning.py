@@ -25,6 +25,21 @@ class SchematicTuning:
     outline_hug_pt: float = 3.0
     #: Only boxes at least this big (pt) have meaningful drawn enclosures.
     outline_min_box_pt: float = 90.0
+    #: A component box covering more than this fraction of the page area is a
+    #: module/assembly ENCLOSURE (a power-supply block drawn around its own
+    #: internal circuit), not a symbol. Clipping wires against it would delete
+    #: the entire internal line work — the reviewed "all wire geometry gone"
+    #: regression — so such boxes are excluded from wire clipping. Individual
+    #: symbols top out well below a quarter of the page; module enclosures
+    #: (the reviewed PS1 box) start around a third.
+    trace_max_clip_box_page_frac: float = 0.25
+
+    # --- cross-pass frame registration --------------------------------------
+    #: Detection-pass boxes are re-registered onto the main pass's coordinate
+    #: frame (via shared-refDes anchors) when their median anchor displacement
+    #: exceeds this many pt — two passes of the same drawing must agree on
+    #: where the same symbol sits before their boxes are merged.
+    frame_reregister_min_offset_pt: float = 10.0
 
     # --- component reconciliation ------------------------------------------
     #: Two boxes overlapping by at least this IoU are one physical glyph seen

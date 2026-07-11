@@ -97,6 +97,18 @@ _VALUE_RE = re.compile(
 #: A bare reference designator the model may echo into the value field.
 _REFDES_RE = re.compile(r"^[A-Z]{1,4}[0-9]{1,4}[A-Z]?$")
 
+#: Component families that have no passive VALUE of their own — a
+#: passive-shaped value on one of these ("1K" on a connector region) is a
+#: neighbouring component's printed value harvested by mistake.
+_VALUELESS_FAMILY_TOKENS = (
+    "connector", "plug", "terminal", "receptacle", "off-page",
+)
+
+
+def _is_valueless_family(component: dict[str, Any]) -> bool:
+    ctype = str(component.get("type") or "").lower()
+    return any(token in ctype for token in _VALUELESS_FAMILY_TOKENS)
+
 
 class _HiResPages:
     """Lazily renders source-PDF pages at high DPI for sharp crops.
@@ -451,6 +463,33 @@ def reconcile_value_part_number(graph: dict[str, Any]) -> int:
     return cleaned
 
 
+def strip_connector_passive_values(graph: dict[str, Any]) -> int:
+    """Clear passive-shaped values harvested onto valueless-family components.
+
+    The whole-page pass (and, historically, the crop pass) associates the
+    nearest printed text with a connector/terminal region — which is usually
+    a NEIGHBOURING resistor/capacitor value ("1K", "2K"). A connector has no
+    passive value, so any passive-shaped value on one is a mis-association:
+    move it aside under ``value_was`` (audit trail) and null ``value``.
+    Returns how many components were cleaned.
+    """
+    cleaned = 0
+    for component in graph.get("components") or []:
+        if not isinstance(component, dict) or not _is_valueless_family(component):
+            continue
+        value = _text(component.get("value"))
+        if not value or not _looks_like_value(value):
+            continue
+        component["value_was"] = value
+        component["value"] = None
+        component["reviewNote"] = (
+            "passive-shaped value on a connector-family component; cleared as "
+            "a neighbouring component's harvested value"
+        )
+        cleaned += 1
+    return cleaned
+
+
 def _needs_identity(component: dict[str, Any]) -> bool:
     # Missing a printed value, or a part-bearing component missing its part
     # number — either gap is worth a focused crop read.
@@ -469,6 +508,11 @@ def _apply_value(component: dict[str, Any], payload: dict[str, Any]) -> bool:
         return False
     value = _text(payload.get("value"))
     if not value or not _plausible_value(value, component):
+        return False
+    # Connector/terminal/off-page regions have no passive value; a
+    # passive-shaped reading there is a NEIGHBOUR's printed value bleeding
+    # into the crop (the reviewed "connector grabs the resistor's 1K").
+    if _is_valueless_family(component) and _looks_like_value(value):
         return False
     component["value"] = value
     component["valueSource"] = "vision-crop"

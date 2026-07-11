@@ -317,6 +317,40 @@ def drop_quantity_annotations(graph: dict[str, Any]) -> list[str]:
     return notes
 
 
+def normalize_quantity_values(graph: dict[str, Any]) -> int:
+    """Move quantity annotations out of ``value`` into ``quantity``, in place.
+
+    ``(2)`` beside a symbol means "two of these"; the vision pass records it
+    on the symbol as ``value: "2"``. A quantity is not a value — exporters
+    would print it as a rating — so it moves to a first-class ``quantity``
+    attribute. Parenthesized numerals convert on any component; bare small
+    integers convert only on grounds (which never carry a value). Returns
+    how many components were normalized.
+    """
+    import re as _re
+
+    # "(2)" anywhere; a bare small integer only on value-less families.
+    quantity_re = _re.compile(r"^\((\d{1,2})\)$|^(\d{1,2})$")
+    normalized = 0
+    for component in graph.get("components") or []:
+        if not isinstance(component, dict):
+            continue
+        value = str(component.get("value") or "").strip()
+        if not value:
+            continue
+        match = quantity_re.match(value)
+        if not match:
+            continue
+        is_parenthesized = match.group(1) is not None
+        is_ground = "ground" in str(component.get("type") or "").lower()
+        if not (is_parenthesized or is_ground):
+            continue
+        component["quantity"] = int(match.group(1) or match.group(2))
+        component["value"] = None
+        normalized += 1
+    return normalized
+
+
 def _bbox_iou(a: Any, b: Any) -> float:
     if not (
         isinstance(a, (list, tuple))

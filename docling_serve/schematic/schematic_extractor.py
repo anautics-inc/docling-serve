@@ -50,7 +50,7 @@ from docling_serve.schematic.kicad_sch import (
     svg_to_kicad_sch,
 )
 from docling_serve.schematic.label_verify import verify_component_labels
-from docling_serve.schematic.net_trace import ComponentBox, TracedNet, trace_nets
+from docling_serve.schematic.net_trace import ComponentBox, Pt, TracedNet, trace_nets
 from docling_serve.schematic.netlist import graph_to_kicad_netlist
 from docling_serve.schematic.raster_lines import ocr_text_labels, raster_wire_polylines
 from docling_serve.schematic.spice import graph_to_spice
@@ -779,6 +779,7 @@ def _enrich_connectivity(
     from docling_serve.schematic.component_identity import (
         reconcile_value_part_number,
         recover_component_identity,
+        strip_connector_passive_values,
     )
 
     if provider.enabled and page_images:
@@ -800,6 +801,16 @@ def _enrich_connectivity(
     reconciled = reconcile_value_part_number(graph)
     if reconciled:
         notes.append(f"value_reconcile: {reconciled} stale value(s) cleared")
+    stripped = strip_connector_passive_values(graph)
+    if stripped:
+        notes.append(
+            f"connector_value_cleanup: {stripped} harvested value(s) cleared"
+        )
+    from docling_serve.schematic.connectivity_ids import normalize_quantity_values
+
+    quantities = normalize_quantity_values(graph)
+    if quantities:
+        notes.append(f"quantity_normalize: {quantities} value(s) -> quantity")
 
     from docling_serve.schematic.connectivity_ids import record_connectivity_quality
 
@@ -972,6 +983,107 @@ def _scale_bboxes_to_pt(
         except (TypeError, ValueError):
             continue
         component["bboxPt"] = [round(x0 * sx, 2), round(y0 * sy, 2), round(x1 * sx, 2), round(y1 * sy, 2)]
+    return True
+
+
+def _is_page_scale_box(bbox_pt: list[float], page_w: float, page_h: float) -> bool:
+    """Is this box a page-scale module ENCLOSURE rather than a symbol?
+
+    A power-supply or assembly block is often drawn as one big outline around
+    its own internal circuit; its bbox then covers most of the page. Using it
+    as a wire-clipping box deletes the entire internal line work (every wire
+    is "inside a component"), which is how a traced drawing regresses to zero
+    wire segments. Threshold from tuning (fraction of page area).
+    """
+    from docling_serve.schematic.schematic_tuning import TUNING
+
+    if page_w <= 0 or page_h <= 0:
+        return False
+    x0, y0, x1, y1 = (float(v) for v in bbox_pt)
+    area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    return area > page_w * page_h * TUNING.trace_max_clip_box_page_frac
+
+
+def _reregister_detection_frame(
+    main_components: list[dict[str, Any]], detection: dict[str, Any]
+) -> bool:
+    """Map a detection pass's ``bboxPt`` boxes onto the main pass's frame.
+
+    The two vision passes each self-report an ``imageSize`` and are scaled to
+    page pt independently — but a pass can mis-report its frame (and cached
+    responses from an earlier prompt revision keep the OLD frame verbatim),
+    leaving the merged graph with components in two disagreeing coordinate
+    systems. This re-registers the detection boxes deterministically: symbols
+    with the SAME refDes in both passes are anchors; a per-axis linear fit
+    (scale + offset, least squares on box centers) maps detection space onto
+    main-pass space. Applied only when the anchors actually disagree
+    (median displacement above the tuning threshold) and the fit improves
+    them. Returns True when a remap was applied.
+    """
+    from docling_serve.schematic.schematic_tuning import TUNING
+
+    main_by_ref: dict[str, list[float]] = {}
+    for component in main_components:
+        ref = component.get("refDes")
+        bbox = component.get("bboxPt")
+        if ref and bbox and not component.get("detectedOnly"):
+            main_by_ref.setdefault(str(ref).strip().upper(), bbox)
+
+    anchors: list[tuple[list[float], list[float]]] = []  # (detection, main)
+    for candidate in detection.get("components") or []:
+        if not isinstance(candidate, dict):
+            continue
+        ref = candidate.get("refDes")
+        bbox = candidate.get("bboxPt")
+        main_bbox = main_by_ref.get(str(ref).strip().upper()) if ref else None
+        if bbox and main_bbox:
+            anchors.append((bbox, main_bbox))
+    if len(anchors) < 2:
+        return False
+
+    def center(bbox: list[float]) -> tuple[float, float]:
+        return (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
+
+    displacements = sorted(
+        math.dist(center(det), center(main)) for det, main in anchors
+    )
+    median_before = displacements[len(displacements) // 2]
+    if median_before <= TUNING.frame_reregister_min_offset_pt:
+        return False  # frames already agree
+
+    def axis_fit(axis: int) -> tuple[float, float] | None:
+        xs = [center(det)[axis] for det, _ in anchors]
+        ys = [center(main)[axis] for _, main in anchors]
+        n = len(xs)
+        mean_x, mean_y = sum(xs) / n, sum(ys) / n
+        var = sum((x - mean_x) ** 2 for x in xs)
+        if var < 1e-6:
+            return None  # anchors are collinear on this axis — no scale info
+        scale = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / var
+        if not (0.1 <= scale <= 10.0):
+            return None  # degenerate fit — refuse to warp the frame
+        return scale, mean_y - scale * mean_x
+
+    fit_x, fit_y = axis_fit(0), axis_fit(1)
+    if fit_x is None or fit_y is None:
+        return False
+
+    def remap(bbox: list[float]) -> list[float]:
+        sx, ox = fit_x
+        sy, oy = fit_y
+        x0, x1 = sorted((bbox[0] * sx + ox, bbox[2] * sx + ox))
+        y0, y1 = sorted((bbox[1] * sy + oy, bbox[3] * sy + oy))
+        return [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]
+
+    residuals = sorted(
+        math.dist(center(remap(det)), center(main)) for det, main in anchors
+    )
+    if residuals[len(residuals) // 2] >= median_before / 2:
+        return False  # the fit doesn't actually reconcile the frames
+
+    for candidate in detection.get("components") or []:
+        if isinstance(candidate, dict) and candidate.get("bboxPt"):
+            candidate["bboxPt"] = remap(candidate["bboxPt"])
     return True
 
 
@@ -1184,6 +1296,14 @@ def _trace_page_nets(
     ):
         detection = result.get(detection_key)
         if isinstance(detection, dict) and _scale_bboxes_to_pt(detection, page_w, page_h):
+            # Both passes are now nominally in page pt, but a pass that
+            # mis-reported its imageSize (or a cached response from an older
+            # prompt) still sits in its own frame. Re-register onto the main
+            # pass via shared-refDes anchors BEFORE merging, so merged boxes
+            # (and every crop/trace that uses them) share one frame.
+            if _reregister_detection_frame(components, detection):
+                _log.info("%s re-registered onto the main-pass frame", source_name)
+                result.setdefault("__frame_reregistered__", []).append(detection_key)
             added = _merge_detected_components(
                 components,
                 [c for c in detection.get("components") or [] if isinstance(c, dict)],
@@ -1198,6 +1318,12 @@ def _trace_page_nets(
     for index, component in enumerate(components):
         bbox_pt = component.get("bboxPt")
         if not bbox_pt:
+            continue
+        # Page-scale enclosure boxes (a module drawn AROUND its internal
+        # circuit) must not clip wires — they would swallow the whole page's
+        # line work and zero out the traced geometry. The module still joins
+        # nets via model claims / segment-terminus reattachment.
+        if _is_page_scale_box([float(v) for v in bbox_pt], page_w, page_h):
             continue
         key = component.get("refDes") or component.get("description") or f"component-{index}"
         boxes.append(ComponentBox(str(key), *(float(v) for v in bbox_pt)))
@@ -1912,11 +2038,25 @@ def _normalize_graph(
                     )
                 )
         else:
-            nets.extend(
-                _model_nets_to_graph_nets(
-                    model_nets, page_no, ref_to_id, page_key_to_id
-                )
+            model_graph_nets = _model_nets_to_graph_nets(
+                model_nets, page_no, ref_to_id, page_key_to_id
             )
+            # Tracing was too sparse to REPLACE the model's connectivity, but
+            # whatever geometry it did find is still real wire art — attach
+            # each traced cluster's segments to the model net it overlaps, so
+            # a positional rendering never loses the copper entirely (the
+            # reviewed partial-to-absent regression).
+            if traced:
+                attached = _attach_traced_segments(
+                    model_graph_nets, traced, page_no, ref_to_id, page_key_to_id
+                )
+                if attached:
+                    _log.info(
+                        "Attached traced segments to %s model net(s) on page %s",
+                        attached,
+                        page_no,
+                    )
+            nets.extend(model_graph_nets)
 
     nets = _merge_named_nets(nets)
 
@@ -2085,6 +2225,71 @@ def _model_nets_to_graph_nets(
     return graph_nets
 
 
+def _dedup_segments(segments: list[tuple[Pt, Pt]]) -> list[list[float]]:
+    """Rounded, de-duplicated ``[x0, y0, x1, y1]`` wire pieces for the graph."""
+    return [
+        list(segment)
+        for segment in dict.fromkeys(
+            (round(a[0], 1), round(a[1], 1), round(b[0], 1), round(b[1], 1))
+            for a, b in segments
+        )
+    ]
+
+
+def _attach_traced_segments(
+    graph_nets: list[dict[str, Any]],
+    traced: list[TracedNet],
+    page_no: int,
+    ref_to_id: dict[str, str],
+    page_key_to_id: dict[tuple[int, str], str],
+) -> int:
+    """Attach traced wire geometry to the model nets it belongs to, in place.
+
+    Used when tracing is too sparse to replace the model's connectivity: the
+    model nets keep the authoritative membership, and each traced cluster's
+    segments join the model net sharing the most components (unique best,
+    ≥ 1 shared). Segment-carrying nets are marked ``segmentsSource:
+    "geometry-partial"`` so consumers know the copper is real but incomplete.
+    Returns how many nets gained segments.
+    """
+    net_members: list[set[str]] = [
+        {
+            str(node.get("component"))
+            for node in net.get("nodes") or []
+            if isinstance(node, dict) and node.get("component")
+        }
+        for net in graph_nets
+    ]
+
+    gained: set[int] = set()
+    for traced_net in traced:
+        if not traced_net.segments:
+            continue
+        cluster_ids = {
+            ref_to_id.get(ref.upper()) or page_key_to_id.get((page_no, ref)) or ref
+            for ref in traced_net.components
+        }
+        overlaps = [
+            (len(cluster_ids & members), index)
+            for index, members in enumerate(net_members)
+        ]
+        overlaps.sort(reverse=True)
+        if not overlaps or overlaps[0][0] < 1:
+            continue
+        if len(overlaps) > 1 and overlaps[0][0] == overlaps[1][0]:
+            continue  # ambiguous — attaching to the wrong net is worse than none
+        target = graph_nets[overlaps[0][1]]
+        merged = [
+            (tuple(segment[:2]), tuple(segment[2:]))
+            for segment in target.get("segments") or []
+        ]
+        merged.extend(traced_net.segments)
+        target["segments"] = _dedup_segments(merged)
+        target["segmentsSource"] = "geometry-partial"
+        gained.add(overlaps[0][1])
+    return len(gained)
+
+
 #: A traced net adopts a model net's name when at least this share of its
 #: components appear in that model net (and they share ≥ 2 components).
 _NET_NAME_MATCH_RATIO = 0.6
@@ -2128,28 +2333,54 @@ def _traced_to_graph_nets(
 
     assignments = _assign_net_labels(traced, labeled_model_sets)
 
+    # Model pin claims are adopted CONSERVATIVELY. The claim list has no
+    # guaranteed ordering correspondence with the geometric attachment
+    # points, so a net's claims apply only when the counts line up exactly —
+    # and each claimed pin is consumed ONCE per component across the page,
+    # best-matched net first. A pin claimed on the winding side of a series
+    # part can then never also land on its output side (the reviewed pin-15
+    # misassignment).
+    pin_plan: dict[tuple[int, str], list[str | None]] = {}
+    consumed: dict[str, set[str]] = {}
+    for traced_index in sorted(range(len(traced)), key=lambda i: -assignments[i][2]):
+        traced_net = traced[traced_index]
+        claimed_by_ref = assignments[traced_index][1]
+        for ref in traced_net.components:
+            ref_key = ref.upper()
+            points = traced_net.attachments.get(ref) or [None]
+            available = [
+                pin
+                for pin in claimed_by_ref.get(ref_key, [])
+                if pin not in consumed.get(ref_key, set())
+            ]
+            if available and len(available) == len(points):
+                pin_plan[(traced_index, ref)] = list(available)
+                consumed.setdefault(ref_key, set()).update(available)
+            else:
+                pin_plan[(traced_index, ref)] = [None] * len(points)
+
     graph_nets: list[dict[str, Any]] = []
     index = 0
     for traced_index, traced_net in enumerate(traced):
-        best_labels, best_pins = assignments[traced_index]
+        best_labels = assignments[traced_index][0]
         if len(traced_net.components) < 2 and not best_labels.get("name"):
             continue  # unnamed single-component runs are untraceable noise
         index += 1
 
         # One node per PHYSICAL connection: the geometric attachment points
         # (where wires meet the component box) define how many times the
-        # component joins this net; the model's pin claims are assigned to
-        # them in order. A component with no resolvable attachment still gets
-        # one membership node.
+        # component joins this net; the model's pin claims are applied per
+        # the conservative plan above. A component with no resolvable
+        # attachment still gets one membership node.
         nodes = []
         for ref in traced_net.components:
             comp_id = (
                 ref_to_id.get(ref.upper()) or page_key_to_id.get((page_no, ref)) or ref
             )
-            pins = list(best_pins.get(ref.upper(), []))
             points = traced_net.attachments.get(ref) or [None]
+            planned = pin_plan.get((traced_index, ref)) or [None] * len(points)
             for slot, point in enumerate(points):
-                pin = pins[slot] if slot < len(pins) else None
+                pin = planned[slot] if slot < len(planned) else None
                 node: dict[str, Any] = {"component": comp_id, "pin": pin}
                 if pin:
                     node["pinSource"] = "model"
@@ -2171,13 +2402,7 @@ def _traced_to_graph_nets(
                 # copper itself (click a wire, highlight the whole net).
                 # De-duplicated: drawings sometimes stroke the same span twice,
                 # and viewers key on the coordinates.
-                "segments": [
-                    list(segment)
-                    for segment in dict.fromkeys(
-                        (round(a[0], 1), round(a[1], 1), round(b[0], 1), round(b[1], 1))
-                        for a, b in traced_net.segments
-                    )
-                ],
+                "segments": _dedup_segments(traced_net.segments),
             }
         )
     return graph_nets
@@ -2211,18 +2436,19 @@ def _tracing_adequate(
 def _assign_net_labels(
     traced: list[TracedNet],
     labeled_model_sets: list[tuple[set[str], dict[str, str | None], dict[str, list[str]]]],
-) -> list[tuple[dict[str, str | None], dict[str, list[str]]]]:
+) -> list[tuple[dict[str, str | None], dict[str, list[str]], float]]:
     """Match each traced net to a model net's labels and pin claims.
 
     First pass: multi-component traced nets adopt the best-overlap model net
     (>=2 shared refs, above the match ratio). Second pass: a single-component
     traced net — an off-page run continuing on another sheet — can't share 2
     refs with anything, so it adopts the UNIQUE unclaimed named model net
-    containing its component; ambiguity leaves it unnamed.
+    containing its component; ambiguity leaves it unnamed. Each assignment
+    carries its match score so pin adoption can rank nets best-match-first.
     """
     label_fields = ("name", "class", "wireId", "gauge", "signalType")
     adopted: set[int] = set()
-    assignments: list[tuple[dict[str, str | None], dict[str, list[str]]]] = []
+    assignments: list[tuple[dict[str, str | None], dict[str, list[str]], float]] = []
     for traced_net in traced:
         refs_upper = {ref.upper() for ref in traced_net.components}
         best_labels: dict[str, str | None] = dict.fromkeys(label_fields)
@@ -2240,9 +2466,10 @@ def _assign_net_labels(
         if best_score < _NET_NAME_MATCH_RATIO:
             best_labels = dict.fromkeys(label_fields)
             best_pins = {}
+            best_score = 0.0
         elif best_model >= 0:
             adopted.add(best_model)
-        assignments.append((best_labels, best_pins))
+        assignments.append((best_labels, best_pins, best_score))
 
     for traced_index, traced_net in enumerate(traced):
         if len(traced_net.components) != 1 or assignments[traced_index][0].get("name"):
@@ -2256,7 +2483,9 @@ def _assign_net_labels(
         if len(candidates) == 1:
             model_index = candidates[0]
             _refs, labels, pins_by_ref = labeled_model_sets[model_index]
-            assignments[traced_index] = (labels, pins_by_ref)
+            # A unique-containment adoption is weaker evidence than a
+            # multi-ref overlap; rank it below any first-pass match.
+            assignments[traced_index] = (labels, pins_by_ref, 0.5)
             adopted.add(model_index)
     return assignments
 

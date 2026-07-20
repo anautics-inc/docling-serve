@@ -72,7 +72,7 @@ class SchematicTuning:
     default_volts_analog: float = 5.0
 
     @classmethod
-    def from_env(cls) -> "SchematicTuning":
+    def from_env(cls) -> SchematicTuning:
         """Load defaults, overriding any field from ``SCHEMATIC_<FIELD>``.
 
         Malformed values FAIL FAST with the offending variable named — a

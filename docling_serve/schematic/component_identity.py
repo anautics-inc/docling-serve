@@ -56,9 +56,26 @@ _MAX_CROP_SIZE = 512
 #: Component-type tokens whose printed identity is a manufacturer part number
 #: worth recovering (not just a passive value).
 _PART_BEARING_TOKENS = (
-    "ic", "mcu", "microcontroller", "regulator", "transistor", "mosfet",
-    "fet", "relay", "switch", "connector", "diode", "led", "buzzer",
-    "crystal", "oscillator", "display", "tube", "op-amp", "opamp", "array",
+    "ic",
+    "mcu",
+    "microcontroller",
+    "regulator",
+    "transistor",
+    "mosfet",
+    "fet",
+    "relay",
+    "switch",
+    "connector",
+    "diode",
+    "led",
+    "buzzer",
+    "crystal",
+    "oscillator",
+    "display",
+    "tube",
+    "op-amp",
+    "opamp",
+    "array",
 )
 
 VALUE_SYSTEM_PROMPT = (
@@ -92,7 +109,7 @@ VALUE_USER_PROMPT = (
 #: multiplier and unit (5.1k, 330, 100nF, 4.7uF, 22R, 1k5, 0.1, 82, 270).
 _VALUE_RE = re.compile(
     r"^[0-9]+(?:[.,][0-9]+)?\s*"  # leading number
-    r"[a-zA-ZµμΩ%/.\-0-9]*$"      # optional multiplier/unit/suffix
+    r"[a-zA-ZµμΩ%/.\-0-9]*$"  # optional multiplier/unit/suffix
 )
 #: A bare reference designator the model may echo into the value field.
 _REFDES_RE = re.compile(r"^[A-Z]{1,4}[0-9]{1,4}[A-Z]?$")
@@ -101,7 +118,11 @@ _REFDES_RE = re.compile(r"^[A-Z]{1,4}[0-9]{1,4}[A-Z]?$")
 #: passive-shaped value on one of these ("1K" on a connector region) is a
 #: neighbouring component's printed value harvested by mistake.
 _VALUELESS_FAMILY_TOKENS = (
-    "connector", "plug", "terminal", "receptacle", "off-page",
+    "connector",
+    "plug",
+    "terminal",
+    "receptacle",
+    "off-page",
 )
 
 
@@ -209,7 +230,9 @@ def recover_component_identity(
         try:
             payload = understand(VALUE_USER_PROMPT, VALUE_SYSTEM_PROMPT, crop_png)
         except Exception as error:  # a bad crop must never fail the job
-            _log.warning("Value crop read failed for %s: %s", component.get("refDes"), error)
+            _log.warning(
+                "Value crop read failed for %s: %s", component.get("refDes"), error
+            )
             continue
         if not isinstance(payload, dict):
             continue
@@ -220,7 +243,9 @@ def recover_component_identity(
     if any(filled.values()):
         _log.info(
             "component identity recovery: %s value(s), %s part number(s) from %s crops",
-            filled["values"], filled["partNumbers"], crops_done,
+            filled["values"],
+            filled["partNumbers"],
+            crops_done,
         )
     return filled
 
@@ -235,7 +260,7 @@ GLYPH_SYSTEM_PROMPT = (
 GLYPH_USER_PROMPT = (
     "This crop is centered on ONE schematic symbol. Classify the CENTERED "
     "symbol only (ignore neighbors at the edges).\n"
-    '- ground: a wire ENDS at 2-4 stacked horizontal bars of DECREASING '
+    "- ground: a wire ENDS at 2-4 stacked horizontal bars of DECREASING "
     "width (or a triangle/rake). One wire in, nothing out the other side.\n"
     "- capacitor: exactly two EQUAL-length parallel plates IN SERIES with a "
     "wire — a wire enters one plate and a separate wire leaves the other.\n"
@@ -268,7 +293,7 @@ _KIND_TO_TYPE = {
 }
 
 
-def disambiguate_capacitor_glyphs(
+def disambiguate_capacitor_glyphs(  # noqa: C901
     graph: dict[str, Any],
     page_images: list[tuple[int, bytes]],
     *,
@@ -375,7 +400,9 @@ def disambiguate_capacitor_glyphs(
         target = _KIND_TO_TYPE.get(kind)
         if target and confidence >= act and target != current_family:
             component["type"] = target
-            component["description"] = f"reclassified {current_family} -> {target}: {reason}"
+            component["description"] = (
+                f"reclassified {current_family} -> {target}: {reason}"
+            )
             # Membership evidence derived from the mis-read description is void
             # (a ground wrongly on a rail would short it); geometric
             # attachments survive the retype.
@@ -602,7 +629,9 @@ def _crop_from_image(
     crop = page.crop(box)
     if crop.width > _MAX_CROP_SIZE or crop.height > _MAX_CROP_SIZE:
         scale = min(_MAX_CROP_SIZE / crop.width, _MAX_CROP_SIZE / crop.height)
-        crop = crop.resize((max(1, int(crop.width * scale)), max(1, int(crop.height * scale))))
+        crop = crop.resize(
+            (max(1, int(crop.width * scale)), max(1, int(crop.height * scale)))
+        )
     buffer = io.BytesIO()
     crop.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
@@ -610,9 +639,10 @@ def _crop_from_image(
 
 def _page_size_pt(graph: dict[str, Any], page_no: int) -> tuple[float, float] | None:
     for page in graph.get("pages") or []:
-        if isinstance(page, dict) and int(
-            page.get("pageNumber") or page.get("page") or 0
-        ) == page_no:
+        if (
+            isinstance(page, dict)
+            and int(page.get("pageNumber") or page.get("page") or 0) == page_no
+        ):
             width = float(page.get("width") or 0)
             height = float(page.get("height") or 0)
             if width > 0 and height > 0:

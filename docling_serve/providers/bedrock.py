@@ -43,9 +43,15 @@ _SUPPORTED_IMAGE_FORMATS = {"png", "jpeg", "gif", "webp"}
 _MAX_IMAGE_BYTES = 4_500_000
 # Dense documents (e.g. full-sheet schematics) can exceed max_tokens mid-answer.
 # When the model stops on "length" we re-issue the request with the partial
-# answer as an assistant prefill (LiteLLM forwards a trailing assistant message
-# as a prefill to Bedrock Claude) so it resumes exactly where it stopped.
+# answer as prior assistant context followed by a user continuation turn.
+# Current Bedrock Claude models reject a trailing assistant prefill, while the
+# explicit user turn works across both old and new model families.
 _MAX_CONTINUATION_ROUNDS = 4
+_MAX_EMPTY_LENGTH_TOKEN_BUDGET = 32_768
+_CONTINUE_PROMPT = (
+    "Continue exactly where the previous response stopped. Return only the "
+    "remaining content, with no preamble and without repeating prior content."
+)
 # Transport-level retry statuses (LiteLLM also retries upstream; this covers
 # proxy restarts and throttling bubbling through).
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
@@ -84,6 +90,7 @@ class BedrockProvider:
         api_key: str | None = None,
         vision_model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
         temperature: float | None = None,
         timeout_seconds: float | None = None,
         max_retries: int | None = None,
@@ -95,13 +102,32 @@ class BedrockProvider:
         )
         self._base_url = (base_url or _resolved_base_url() or "").rstrip("/")
         self._api_key = api_key or _resolved_api_key()
-        self._vision_model = vision_model or getattr(
-            docling_serve_settings,
-            "bedrock_vision_model",
-            "bedrock-claude-sonnet-4-5",
+        self._vision_model: str = str(
+            vision_model
+            or getattr(
+                docling_serve_settings,
+                "bedrock_vision_model",
+                "bedrock-claude-sonnet-4-5",
+            )
+            or "bedrock-claude-sonnet-4-5"
         )
         self._max_tokens = max_tokens or int(
             getattr(docling_serve_settings, "bedrock_max_tokens", 8192)
+        )
+        self._reasoning_effort = (
+            (
+                reasoning_effort
+                if reasoning_effort is not None
+                else str(
+                    getattr(
+                        docling_serve_settings,
+                        "bedrock_reasoning_effort",
+                        "low",
+                    )
+                )
+            )
+            .strip()
+            .lower()
         )
         self._temperature = (
             temperature
@@ -188,6 +214,11 @@ class BedrockProvider:
                 temperature if temperature is not None else self._temperature
             ),
         }
+        if self._reasoning_effort in {"minimal", "low", "medium", "high"}:
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": self._reasoning_effort}
+            # Adaptive thinking does not accept deterministic temperature.
+            payload.pop("temperature", None)
         # Attribute the spend to the originating user/tenant when a request
         # identity is bound (deep-extraction tasks bind it from task metadata).
         # The call still authenticates with the docling-serve service key.
@@ -203,16 +234,53 @@ class BedrockProvider:
 
         parts: list[str] = []
         for _ in range(_MAX_CONTINUATION_ROUNDS + 1):
-            data = self._post_chat_completion(client, payload, headers=request_headers)
-            text, finish_reason = _extract_text(data)
+            try:
+                data = self._post_chat_completion(
+                    client, payload, headers=request_headers
+                )
+            except BedrockUnavailableError as err:
+                if "thinking" not in payload or not _is_reasoning_parameter_error(err):
+                    raise
+                _log.warning(
+                    "Vision model rejected adaptive reasoning parameters; retrying without them."
+                )
+                payload.pop("thinking", None)
+                payload.pop("output_config", None)
+                payload["temperature"] = (
+                    temperature if temperature is not None else self._temperature
+                )
+                data = self._post_chat_completion(
+                    client, payload, headers=request_headers
+                )
+            try:
+                text, finish_reason = _extract_text(data)
+            except BedrockUnavailableError as err:
+                finish_reason = _finish_reason(data)
+                current_budget = int(payload["max_tokens"])
+                if (
+                    str(err) == "Model returned an empty response."
+                    and finish_reason == "length"
+                    and current_budget < _MAX_EMPTY_LENGTH_TOKEN_BUDGET
+                ):
+                    next_budget = min(
+                        current_budget * 2,
+                        _MAX_EMPTY_LENGTH_TOKEN_BUDGET,
+                    )
+                    _log.warning(
+                        "Model consumed the %s-token budget before emitting content; "
+                        "retrying with %s tokens.",
+                        current_budget,
+                        next_budget,
+                    )
+                    payload["max_tokens"] = next_budget
+                    continue
+                raise
             parts.append(text)
             if finish_reason != "length":
                 break
-            # Assistant prefill: the model resumes mid-token from the partial
-            # text, so plain concatenation reconstructs the full answer.
-            # Claude rejects prefill with trailing whitespace, so strip it
-            # consistently from both the prefill and the accumulated answer
-            # (whitespace there is insignificant outside string literals).
+            # Preserve the partial answer as prior assistant context, but end
+            # with a user message. Bedrock rejects trailing assistant prefill
+            # for current Claude models.
             accumulated = "".join(parts).rstrip()
             parts = [accumulated]
             _log.info(
@@ -222,6 +290,7 @@ class BedrockProvider:
             payload["messages"] = [
                 *chat_messages,
                 {"role": "assistant", "content": accumulated},
+                {"role": "user", "content": _CONTINUE_PROMPT},
             ]
         else:
             _log.warning(
@@ -242,9 +311,11 @@ class BedrockProvider:
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             if attempt:
-                time.sleep(min(2.0 ** attempt, 10.0))
+                time.sleep(min(2.0**attempt, 10.0))
             try:
-                response = client.post("/chat/completions", json=payload, headers=headers)
+                response = client.post(
+                    "/chat/completions", json=payload, headers=headers
+                )
             except httpx.HTTPError as err:
                 last_error = err
                 _log.warning(
@@ -299,7 +370,9 @@ class BedrockProvider:
         :class:`BedrockUnavailableError` when no JSON object can be recovered.
         """
         text = self.converse(
-            messages=[VisionMessage(text=prompt, images=images, image_format=image_format)],
+            messages=[
+                VisionMessage(text=prompt, images=images, image_format=image_format)
+            ],
             system=system,
             model_id=model_id,
             max_tokens=max_tokens,
@@ -349,6 +422,26 @@ def _to_chat_message(message: VisionMessage) -> dict[str, Any]:
         )
     content.append({"type": "text", "text": message.text})
     return {"role": "user", "content": content}
+
+
+def _finish_reason(data: dict[str, Any]) -> str | None:
+    choices = (data or {}).get("choices") or []
+    if not choices:
+        return None
+    return (choices[0] or {}).get("finish_reason")
+
+
+def _is_reasoning_parameter_error(error: Exception) -> bool:
+    message = str(error).casefold()
+    return any(
+        token in message
+        for token in (
+            "thinking",
+            "output_config",
+            "reasoning_effort",
+            "adaptive",
+        )
+    )
 
 
 def _extract_text(data: dict[str, Any]) -> tuple[str, str | None]:

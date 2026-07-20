@@ -12,6 +12,9 @@ import asyncio
 import datetime
 import os
 import sys
+from pathlib import Path
+
+_PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 
 
 async def _get_tenant_activity_breakdown(redis_manager, tenant_id: str) -> dict:
@@ -46,7 +49,7 @@ async def _get_tenant_activity_breakdown(redis_manager, tenant_id: str) -> dict:
 async def debug_redis_state():  # noqa: C901
     """Check Redis state for Ray orchestrator."""
     # Add parent directory to path for imports
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, _PACKAGE_ROOT)
 
     from docling_jobkit.orchestrators.ray.redis_helper import RedisStateManager
 

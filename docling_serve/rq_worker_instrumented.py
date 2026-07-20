@@ -12,7 +12,17 @@ from docling_jobkit.convert.manager import (
 from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestratorConfig
 from docling_jobkit.orchestrators.rq.worker import CustomRQWorker
 
+from docling_serve.legacy_office import (
+    build_converter_manager,
+    check_legacy_office_capability,
+)
 from docling_serve.rq_instrumentation import extract_trace_context
+from docling_serve.settings import docling_serve_settings
+from docling_serve.telemetry import (
+    record_sanitized_exception,
+    sanitize_telemetry_text,
+)
+from docling_serve.upload_staging import check_upload_staging_capability
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +38,10 @@ class InstrumentedRQWorker(CustomRQWorker):
         scratch_dir: Path,
         **kwargs,
     ):
+        if docling_serve_settings.legacy_office_enabled:
+            check_legacy_office_capability()
+        if docling_serve_settings.upload_staging_mode == "required":
+            check_upload_staging_capability(force=True)
         super().__init__(
             *args,
             orchestrator_config=orchestrator_config,
@@ -35,6 +49,10 @@ class InstrumentedRQWorker(CustomRQWorker):
             scratch_dir=scratch_dir,
             **kwargs,
         )
+        # CustomRQWorker constructs jobkit's base manager. Replace it at worker
+        # boot so durable RQ jobs preconvert legacy Office inputs immediately
+        # before Docling extraction.
+        self.conversion_manager = build_converter_manager(cm_config)
         self.tracer = trace.get_tracer(__name__)
 
     def perform_job(self, job, queue):
@@ -48,7 +66,10 @@ class InstrumentedRQWorker(CustomRQWorker):
         parent_context = extract_trace_context(job)
 
         # Create span name from job function
-        func_name = job.func_name if hasattr(job, "func_name") else "unknown"
+        func_name = sanitize_telemetry_text(
+            job.func_name if hasattr(job, "func_name") else "unknown",
+            limit=96,
+        )
         span_name = f"rq.job.{func_name}"
 
         # Start span with parent context
@@ -59,12 +80,8 @@ class InstrumentedRQWorker(CustomRQWorker):
         ) as span:
             try:
                 # Add job attributes to span
-                span.set_attribute("rq.job.id", job.id)
                 span.set_attribute("rq.job.func_name", func_name)
-                span.set_attribute("rq.queue.name", queue.name)
-
-                if hasattr(job, "description") and job.description:
-                    span.set_attribute("rq.job.description", job.description)
+                span.set_attribute("rq.queue.name", sanitize_telemetry_text(queue.name))
 
                 if hasattr(job, "timeout") and job.timeout:
                     span.set_attribute("rq.job.timeout", job.timeout)
@@ -85,22 +102,22 @@ class InstrumentedRQWorker(CustomRQWorker):
                     if sources:
                         span.set_attribute("docling.task.num_sources", len(sources))
 
-                logger.info(
-                    f"Executing job {job.id} with trace_id={span.get_span_context().trace_id:032x}"
-                )
+                logger.info("Executing instrumented RQ job")
 
                 # Execute the actual job
                 result = super().perform_job(job, queue)
 
                 # Mark span as successful
                 span.set_status(Status(StatusCode.OK))
-                logger.debug(f"Job {job.id} completed successfully")
+                logger.debug("Instrumented RQ job completed successfully")
 
                 return result
 
             except Exception as e:
                 # Record exception and mark span as failed
-                logger.error(f"Job {job.id} failed: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, str(e)))
+                logger.error(
+                    "Instrumented RQ job failed: %s",
+                    sanitize_telemetry_text(e),
+                )
+                record_sanitized_exception(span, e)
                 raise

@@ -90,9 +90,7 @@ _NET_TOKEN_CANON = {
 def _net_tokens(name: str) -> frozenset[str]:
     """Significant tokens of a net name (polarity kept as +/- prefixes)."""
     return frozenset(
-        _NET_TOKEN_CANON.get(t, t)
-        for t in _normalize_net(name).split(" ")
-        if t
+        _NET_TOKEN_CANON.get(t, t) for t in _normalize_net(name).split(" ") if t
     )
 
 
@@ -199,8 +197,10 @@ def score_graph(graph: dict[str, Any], label: dict[str, Any]) -> EvalScore:
     quality = graph.get("connectivityQuality") or {}
     verified = quality.get("verifiedComponentFraction")
 
-    overall = 0.5 * component_score + 0.3 * net_coverage + 0.2 * (
-        component_score if not phantom_breaches else 0.0
+    overall = (
+        0.5 * component_score
+        + 0.3 * net_coverage
+        + 0.2 * (component_score if not phantom_breaches else 0.0)
     )
 
     passed = (
@@ -215,7 +215,9 @@ def score_graph(graph: dict[str, Any], label: dict[str, Any]) -> EvalScore:
         passed = passed and verified >= label["minVerifiedFraction"]
 
     return EvalScore(
-        drawing=str(label.get("drawing") or graph.get("source", {}).get("fileName") or "?"),
+        drawing=str(
+            label.get("drawing") or graph.get("source", {}).get("fileName") or "?"
+        ),
         componentScore=component_score,
         netNameCoverage=net_coverage,
         verifiedFraction=verified,

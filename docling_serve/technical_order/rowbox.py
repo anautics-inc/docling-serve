@@ -20,6 +20,10 @@ from pathlib import Path
 
 _XHTML_NS = "{http://www.w3.org/1999/xhtml}"
 _WS = re.compile(r"\s+")
+# Dirty vendor-OCR text layers leak C0 control characters into the words that
+# ``pdftotext -bbox-layout`` emits, which are invalid XML 1.0 and abort the
+# whole parse (losing every row box in the document). Strip them up front.
+_XML_INVALID = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 @dataclass(slots=True)
@@ -46,7 +50,8 @@ def page_line_boxes(pdf_path: Path) -> dict[int, PageLines]:
         check=True,
         timeout=300,
     )
-    root = ET.fromstring(out.stdout.decode("utf-8", errors="replace"))
+    xml_text = _XML_INVALID.sub("", out.stdout.decode("utf-8", errors="replace"))
+    root = ET.fromstring(xml_text)
     pages: dict[int, PageLines] = {}
     for page_no, page in enumerate(root.iter(f"{_XHTML_NS}page"), start=1):
         width = float(page.get("width", "0") or 0)

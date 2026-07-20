@@ -1,0 +1,37 @@
+{
+  "baseline_observation": {
+    "derived_metrics": {
+      "app_file_fan_out": 9,
+      "dangling_edge_ratio": 0.1902,
+      "largest_file_scc": 1,
+      "legacy_office_symbols": 2,
+      "max_file_fan_out": 24,
+      "schematic_extractor_symbols": 81,
+      "settings_inbound_files": 13,
+      "upload_staging_symbols": 2
+    },
+    "informational_metrics": {
+      "edges": 7676,
+      "nodes": 3399
+    },
+    "source_snapshot": {
+      "algorithm": "sha256-current-regular-symlink-path-mode-content-v2",
+      "digest": "b12ede1e47df8c8f62900aea6d9020c8c0b3a1d1582eef8ec087578feb166c76",
+      "file_count": 509,
+      "git_sha_supplemental": "525ac07f6214b756a959b3ca9ccdd92bf1f49dc4"
+    }
+  },
+  "graphify_version": "0.9.20",
+  "normalization_version": 2,
+  "ratchet_ceilings": {
+    "app_file_fan_out": 9,
+    "dangling_edge_ratio": 0.1894,
+    "largest_file_scc": 1,
+    "legacy_office_symbols": 2,
+    "max_file_fan_out": 24,
+    "schematic_extractor_symbols": 81,
+    "settings_inbound_files": 13,
+    "upload_staging_symbols": 2
+  },
+  "schema_version": 1
+}

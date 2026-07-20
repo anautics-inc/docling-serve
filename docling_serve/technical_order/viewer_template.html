@@ -1,0 +1,1135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Technical Order Viewer</title>
+<style>
+  :root {
+    --bg: #12151a; --panel: #1a1f27; --panel2: #202632; --line: #2c3442;
+    --text: #dce3ec; --dim: #8a94a6; --accent: #4da3ff; --accent2: #ffb454;
+    --good: #4ec97a; --warn: #e06c75; --hotspot: rgba(77, 163, 255, 0.18);
+    --hotspot-line: #4da3ff; --flash: #ffb454; --region: rgba(78, 201, 122, 0.14);
+    --region-line: #4ec97a; --paper: #f4f1ea; --ink: #23201b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+  }
+  header {
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; white-space: nowrap; }
+  header .title { color: var(--dim); font-size: 13px; }
+  nav { display: flex; gap: 2px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  nav button {
+    background: none; border: none; color: var(--dim); padding: 9px 14px; cursor: pointer;
+    font-size: 13px; border-bottom: 2px solid transparent;
+  }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  nav button:hover { color: var(--text); }
+  main { flex: 1; min-height: 0; display: none; }
+  main.active { display: flex; }
+
+  .sidebar {
+    width: 290px; min-width: 220px; background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto; flex-shrink: 0;
+  }
+  .sidebar .item {
+    padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line); font-size: 13px;
+  }
+  .sidebar .item:hover { background: var(--panel2); }
+  .sidebar .item.active { background: var(--panel2); border-left: 3px solid var(--accent); padding-left: 9px; }
+  .sidebar .item .num { color: var(--accent); font-weight: 600; }
+  .sidebar .item .meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+
+  /* ================= document (digital twin of the whole TO) ============= */
+  #view-document { flex-direction: row; }
+  .doc-nav {
+    width: 270px; min-width: 200px; background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto; flex-shrink: 0; font-size: 12.5px;
+  }
+  .doc-nav .nav-entry {
+    display: flex; gap: 8px; padding: 5px 12px; cursor: pointer; align-items: baseline;
+  }
+  .doc-nav .nav-entry:hover { background: var(--panel2); }
+  .doc-nav .kind {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px; background: var(--panel2);
+    border: 1px solid var(--line); color: var(--dim); white-space: nowrap;
+  }
+  .doc-scroll { flex: 1; overflow-y: auto; background: #0b0d11; }
+  a.xref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent);
+    cursor: pointer; }
+  a.xref:hover { background: rgba(94, 176, 239, 0.14); }
+  a.xref.part { color: #7dd3a0; border-bottom-color: #7dd3a0; }
+  a.xref.part:hover { background: rgba(125, 211, 160, 0.14); }
+  .coverage-banner { padding: 8px 12px; font-size: 11.5px; color: var(--dim);
+    border-bottom: 1px solid var(--line); }
+  .coverage-banner .warn { color: #e8b054; }
+  .coverage-banner .ok { color: #7dd3a0; }
+  .doc-flow { max-width: 880px; margin: 0 auto; padding: 26px 30px 120px; }
+  .doc-page { margin-bottom: 26px; }
+  .doc-page .page-tag {
+    font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em;
+    border-bottom: 1px dashed var(--line); padding-bottom: 3px; margin-bottom: 12px;
+  }
+  .paper {
+    background: var(--paper); color: var(--ink); border-radius: 6px; padding: 46px 50px;
+    box-shadow: 0 4px 22px rgba(0,0,0,0.5); font-family: Georgia, "Times New Roman", serif;
+  }
+  .paper .tl { text-align: center; margin: 4px 0; }
+  .paper .tl.big { font-size: 21px; font-weight: 700; letter-spacing: 0.02em; }
+  .paper .tl.mid { font-size: 16px; font-weight: 600; }
+  .paper .tl.small { font-size: 12.5px; }
+  [data-info] { transition: background 0.12s; border-radius: 3px; }
+  [data-info]:hover { background: rgba(77, 163, 255, 0.16); outline: 1px solid rgba(77,163,255,0.45); cursor: help; }
+  .blk-heading { margin: 18px 0 8px; }
+  .blk-heading .hnum { color: var(--accent); font-weight: 700; margin-right: 8px; }
+  h2.blk-heading { font-size: 17px; } h3.blk-heading { font-size: 15px; } h4.blk-heading { font-size: 13.5px; }
+  .blk-para { margin: 7px 0; font-size: 13.5px; color: var(--text); }
+  .blk-para .pnum { color: var(--accent2); font-weight: 600; margin-right: 7px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .blk-adm { border-left: 4px solid; border-radius: 4px; padding: 8px 12px; margin: 10px 0; font-size: 13px; background: var(--panel); }
+  .blk-adm.warning { border-color: var(--warn); } .blk-adm.caution { border-color: var(--accent2); }
+  .blk-adm.note { border-color: var(--accent); }
+  .blk-adm .adm-kind { font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.1em; margin-right: 8px; }
+  .blk-adm.warning .adm-kind { color: var(--warn); } .blk-adm.caution .adm-kind { color: var(--accent2); }
+  .blk-adm.note .adm-kind { color: var(--accent); }
+  .blk-toc { display: flex; gap: 8px; font-size: 12.5px; padding: 1.5px 0; }
+  .blk-toc .tnum { color: var(--accent); min-width: 60px; font-family: ui-monospace, monospace; }
+  .blk-toc .tdots { flex: 1; border-bottom: 1px dotted var(--line); margin-bottom: 4px; }
+  .blk-toc .tpage { color: var(--dim); }
+  .doc-figure { background: #fff; border-radius: 6px; padding: 8px; position: relative; }
+  .doc-figure .fig-twin-wrap { position: relative; }
+  .doc-figure img { width: 100%; display: block; }
+  .doc-figure .fig-cap { color: var(--ink); background: #fff; font-size: 12.5px; text-align: center; padding: 6px 0 2px; font-family: Georgia, serif; }
+  .doc-parts-table { background: var(--panel); border-radius: 6px; overflow: hidden; }
+  .mini-note { color: var(--dim); font-size: 11.5px; margin: 6px 2px; }
+  #hover-card {
+    position: fixed; z-index: 50; max-width: 380px; background: var(--panel2);
+    border: 1px solid var(--accent); border-radius: 6px; padding: 8px 12px; font-size: 12px;
+    pointer-events: none; display: none; box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+  }
+  #hover-card .hk { color: var(--accent); font-weight: 600; }
+  #hover-card .hv { color: var(--text); }
+  #hover-card dl { margin: 4px 0 0; display: grid; grid-template-columns: 92px 1fr; gap: 1px 8px; }
+  #hover-card dt { color: var(--dim); } #hover-card dd { margin: 0; overflow-wrap: anywhere; }
+
+  /* ---------- figures view ---------- */
+  #view-figures { flex-direction: row; }
+  .fig-center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .fig-toolbar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  .fig-toolbar .caption { font-size: 13px; color: var(--dim); margin-right: auto; }
+  .fig-toolbar button, .sheet-tab {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  .fig-toolbar button:hover { border-color: var(--accent); }
+  .fig-toolbar button.toggled { border-color: var(--accent); color: var(--accent); }
+  .sheet-tab.active { border-color: var(--accent); color: var(--accent); }
+  .stage { flex: 1; min-height: 0; overflow: hidden; position: relative; background: #0b0d11; cursor: grab; }
+  .stage.panning { cursor: grabbing; }
+  .stage-inner { position: absolute; transform-origin: 0 0; }
+  .stage-inner img { display: block; user-select: none; -webkit-user-drag: none; background: #fff; }
+  .hotspot {
+    position: absolute; border: 1.5px solid var(--hotspot-line); background: var(--hotspot);
+    border-radius: 2px; cursor: pointer;
+  }
+  .hotspot:hover { background: rgba(77, 163, 255, 0.38); }
+  .hotspot.linked-flash { animation: flash 1.2s ease-out 3; }
+  .hotspot .tag {
+    position: absolute; top: -16px; left: -1px; font-size: 10px; line-height: 1;
+    background: var(--hotspot-line); color: #08111d; padding: 2px 4px; border-radius: 2px;
+    white-space: nowrap; display: none;
+  }
+  .hotspot:hover .tag, .hotspot.linked-flash .tag { display: block; }
+  @keyframes flash {
+    0% { box-shadow: 0 0 0 4px var(--flash); border-color: var(--flash); }
+    100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+  }
+  svg.region-layer { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
+  svg.region-layer polygon {
+    fill: var(--region); stroke: var(--region-line); stroke-width: 1.5;
+    vector-effect: non-scaling-stroke; pointer-events: auto; cursor: pointer;
+  }
+  svg.region-layer polygon:hover, svg.region-layer polygon.hl { fill: rgba(78, 201, 122, 0.4); }
+  svg.region-layer line { stroke: var(--region-line); stroke-width: 1; vector-effect: non-scaling-stroke; stroke-dasharray: 4 3; }
+
+  .fig-parts {
+    width: 460px; min-width: 300px; background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; flex-shrink: 0;
+  }
+  .fig-parts h3, .sch-side h3 { margin: 0; padding: 8px 12px; font-size: 12px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: 0.06em; border-bottom: 1px solid var(--line); }
+  .parts-scroll { flex: 1; overflow-y: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th {
+    text-align: left; color: var(--dim); font-weight: 600; padding: 6px 8px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+    white-space: nowrap;
+  }
+  td { padding: 5px 8px; border-bottom: 1px solid rgba(44, 52, 66, 0.5); vertical-align: top; }
+  tr.part-row { cursor: pointer; }
+  tr.part-row:hover { background: var(--panel2); }
+  tr.part-row.selected { background: rgba(77, 163, 255, 0.14); outline: 1px solid var(--accent); }
+  td.mono, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; }
+  td .desc-indent { color: var(--dim); }
+  .idx-chip { color: var(--accent2); font-weight: 600; }
+  .part-detail {
+    border-top: 1px solid var(--line); padding: 10px 12px; font-size: 12px; background: var(--panel2);
+    max-height: 220px; overflow-y: auto;
+  }
+  .part-detail .pn { font-size: 14px; font-weight: 700; color: var(--accent); }
+  .part-detail dl { display: grid; grid-template-columns: 110px 1fr; gap: 2px 10px; margin: 8px 0 0; }
+  .part-detail dt { color: var(--dim); }
+  .part-detail dd { margin: 0; }
+
+  /* ---------- parts + assembly ---------- */
+  #view-parts, #view-assembly { flex-direction: column; }
+  .search-bar { padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+    display: flex; gap: 10px; align-items: center; }
+  .search-bar input {
+    flex: 1; max-width: 480px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 4px; padding: 7px 10px; font-size: 13px;
+  }
+  .search-bar input:focus { outline: none; border-color: var(--accent); }
+  .search-bar .count { color: var(--dim); font-size: 12px; }
+  .table-scroll { flex: 1; overflow: auto; }
+  .tree { padding: 12px 20px; font-size: 13px; }
+  .tree-node { padding: 3px 6px; border-radius: 4px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
+  .tree-node:hover { background: var(--panel2); }
+  .tree-node .t-pn { font-family: ui-monospace, monospace; color: var(--accent); min-width: 150px; }
+  .tree-node .t-qty { color: var(--accent2); min-width: 36px; text-align: right; }
+  .tree-node .t-desc { color: var(--text); }
+  .tree-node .t-fig { color: var(--dim); font-size: 11.5px; margin-left: auto; white-space: nowrap; }
+  .tree-kids { border-left: 1px solid var(--line); margin-left: 14px; padding-left: 10px; }
+  details.tree-branch > summary { list-style: none; }
+  details.tree-branch > summary::-webkit-details-marker { display: none; }
+  details.tree-branch > summary .tree-node::before { content: "\25B8"; color: var(--dim); margin-right: 2px; }
+  details.tree-branch[open] > summary .tree-node::before { content: "\25BE"; }
+  .leaf .tree-node::before { content: "\2022"; color: var(--line); margin-right: 2px; }
+
+  /* ---------- schematics ---------- */
+  #view-schematics { flex-direction: row; }
+  .sch-center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .sch-side {
+    width: 430px; min-width: 300px; background: var(--panel); border-left: 1px solid var(--line);
+    overflow-y: auto; flex-shrink: 0;
+  }
+  .comp-box {
+    position: absolute; border: 1.5px dashed rgba(255, 180, 84, 0.9);
+    background: rgba(255, 180, 84, 0.08); border-radius: 2px; cursor: pointer;
+  }
+  .comp-box:hover, .comp-box.hl { background: rgba(255, 180, 84, 0.3); }
+  .comp-box .tag {
+    position: absolute; top: -15px; left: -1px; font-size: 10px; line-height: 1;
+    background: var(--accent2); color: #21160a; padding: 2px 4px; border-radius: 2px; display: none;
+    white-space: nowrap;
+  }
+  .comp-box:hover .tag, .comp-box.hl .tag { display: block; }
+  tr.comp-row, tr.net-row { cursor: pointer; }
+  tr.comp-row:hover, tr.net-row:hover { background: var(--panel2); }
+  tr.comp-row.selected { background: rgba(255, 180, 84, 0.14); }
+  .sch-warnings { padding: 10px 12px; font-size: 11.5px; color: var(--dim); }
+  .sch-warnings li { margin-bottom: 4px; }
+
+  /* ---------- info ---------- */
+  #view-info { overflow-y: auto; display: none; }
+  #view-info.active { display: block; }
+  .info-wrap { max-width: 900px; margin: 0 auto; padding: 24px 20px; }
+  .info-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 16px 20px; margin-bottom: 16px; }
+  .info-card h2 { margin: 0 0 12px; font-size: 14px; color: var(--accent); }
+  .info-card dl { display: grid; grid-template-columns: 220px 1fr; gap: 6px 16px; margin: 0; font-size: 13px; }
+  .info-card dt { color: var(--dim); }
+  .info-card dd { margin: 0; overflow-wrap: anywhere; }
+  a { color: var(--accent); }
+  .empty { padding: 30px; color: var(--dim); text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="hdr-number"></h1>
+  <span class="title" id="hdr-title"></span>
+  <span class="title" id="hdr-stats" style="margin-left:auto"></span>
+</header>
+<nav id="tabs">
+  <button data-view="document" class="active">Document</button>
+  <button data-view="figures">Figures &amp; Hotspots</button>
+  <button data-view="parts">Parts List</button>
+  <button data-view="assembly">Assembly</button>
+  <button data-view="schematics">Schematics</button>
+  <button data-view="info">Extraction Info</button>
+</nav>
+
+<main id="view-document" class="active">
+  <div class="doc-nav" id="doc-nav"></div>
+  <div class="doc-scroll" id="doc-scroll"><div class="doc-flow" id="doc-flow"></div></div>
+</main>
+<div id="hover-card"></div>
+
+<main id="view-figures">
+  <div class="sidebar" id="fig-list"></div>
+  <div class="fig-center">
+    <div class="fig-toolbar">
+      <span class="caption" id="fig-caption"></span>
+      <span id="sheet-tabs"></span>
+      <button id="btn-vector" class="toggled" title="vector digital twin vs raster render">Vector</button>
+      <button id="btn-hotspots" class="toggled">Hotspots</button>
+      <button id="btn-regions" class="toggled">Part regions</button>
+      <button id="btn-fit">Fit</button>
+      <button id="btn-100">100%</button>
+    </div>
+    <div class="stage" id="fig-stage">
+      <div class="stage-inner" id="fig-inner">
+        <img id="fig-img" alt="figure">
+        <div id="fig-overlay"></div>
+      </div>
+    </div>
+  </div>
+  <div class="fig-parts">
+    <h3 id="fig-parts-title">Parts on this figure</h3>
+    <div class="parts-scroll">
+      <table>
+        <thead><tr><th>IDX</th><th>PART NUMBER</th><th>DESCRIPTION</th><th>QTY</th><th>SMR</th></tr></thead>
+        <tbody id="fig-parts-body"></tbody>
+      </table>
+    </div>
+    <div class="part-detail" id="part-detail" hidden></div>
+  </div>
+</main>
+
+<main id="view-parts">
+  <div class="search-bar">
+    <input id="parts-search" type="search"
+      placeholder="Search part number, description, NSN, CAGE, ref des, figure&hellip;">
+    <span class="count" id="parts-count"></span>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>FIG</th><th>IDX</th><th>PART NUMBER</th><th>REF DES</th><th>CAGE</th>
+        <th>DESCRIPTION</th><th>QTY</th><th>SMR</th><th>NSN</th><th>UOC</th>
+      </tr></thead>
+      <tbody id="parts-body"></tbody>
+    </table>
+  </div>
+</main>
+
+<main id="view-assembly">
+  <div class="search-bar">
+    <span class="count" id="assembly-count"></span>
+  </div>
+  <div class="table-scroll"><div class="tree" id="assembly-tree"></div></div>
+</main>
+
+<main id="view-schematics">
+  <div class="sidebar" id="sch-list"></div>
+  <div class="sch-center">
+    <div class="fig-toolbar">
+      <span class="caption" id="sch-caption"></span>
+      <button id="btn-comps" class="toggled">Components</button>
+      <button id="btn-sch-fit">Fit</button>
+      <button id="btn-sch-100">100%</button>
+    </div>
+    <div class="stage" id="sch-stage">
+      <div class="stage-inner" id="sch-inner">
+        <img id="sch-img" alt="schematic">
+        <div id="sch-overlay"></div>
+      </div>
+    </div>
+  </div>
+  <div class="sch-side">
+    <h3>Components</h3>
+    <table>
+      <thead><tr><th>REF</th><th>TYPE</th><th>PART NO.</th><th>PINS</th></tr></thead>
+      <tbody id="sch-comp-body"></tbody>
+    </table>
+    <h3>Nets / Wires</h3>
+    <table>
+      <thead><tr><th>NET</th><th>GAUGE</th><th>CONNECTS</th></tr></thead>
+      <tbody id="sch-net-body"></tbody>
+    </table>
+    <h3>Extractor warnings</h3>
+    <ul class="sch-warnings" id="sch-warnings"></ul>
+  </div>
+</main>
+
+<main id="view-info"><div class="info-wrap" id="info-wrap"></div></main>
+
+<script src="viewer-data.js"></script>
+<script>
+(function () {
+  "use strict";
+  const DATA = window.CAPTIFY_BUNDLE;
+  if (!DATA || !DATA.bom) {
+    document.body.innerHTML = '<div class="empty">viewer-data.js missing or invalid — ' +
+      'regenerate the bundle with the viewer builder.</div>';
+    return;
+  }
+  const bom = DATA.bom;
+  const doc = bom.document || {};
+  const entries = bom.entries || [];
+  const figures = bom.figures || [];
+  const content = bom.content || DATA.content || null;
+  const twin = DATA.drawingTwin || null;
+  const natural = new Intl.Collator(undefined, { numeric: true });
+  const groups = (bom.figureGroups || []).slice()
+    .sort((a, b) => natural.compare(a.figureNumber, b.figureNumber));
+  const schematics = DATA.schematicGraph || null;
+  const schPages = DATA.schematicPages || [];
+  const bySeq = new Map(entries.map((e) => [e.sequence, e]));
+  const figByMedia = new Map(figures.map((f) => [f.mediaKey, f]));
+  const twinByFig = new Map((twin && twin.figures || []).map((t) =>
+    [String(t.figureNumber) + "|" + String(t.sheetNumber || ""), t]));
+  const childrenOf = new Map();
+  entries.forEach((e) => {
+    if (e.parentSequence != null) {
+      if (!childrenOf.has(e.parentSequence)) childrenOf.set(e.parentSequence, []);
+      childrenOf.get(e.parentSequence).push(e);
+    }
+  });
+  const el = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const escAttr = (s) => esc(s).replace(/"/g, "&quot;");
+
+  /* ---------- header + tabs ---------- */
+  el("hdr-number").textContent = doc.toNumberRaw || doc.documentNumber || "Technical Order";
+  el("hdr-title").textContent = doc.documentTitle || "";
+  const stats = bom.stats || {};
+  el("hdr-stats").textContent =
+    (stats.entryCount || entries.length) + " parts \u00b7 " +
+    (stats.figureCount || groups.length) + " figures" +
+    (content ? " \u00b7 " + content.pageCount + " pages digitized" : "") +
+    (schPages.length ? " \u00b7 " + schPages.length + " schematics" : "");
+
+  document.querySelectorAll("#tabs button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b === btn));
+      document.querySelectorAll("main").forEach((m) =>
+        m.classList.toggle("active", m.id === "view-" + btn.dataset.view));
+      if (btn.dataset.view === "figures") figStage.fit();
+      if (btn.dataset.view === "schematics") schStage.fit();
+    });
+  });
+
+  /* ---------- hover provenance card (document tab) ---------- */
+  const hoverCard = el("hover-card");
+  document.addEventListener("mousemove", (ev) => {
+    const t = ev.target.closest("[data-info]");
+    if (!t) { hoverCard.style.display = "none"; return; }
+    let info;
+    try { info = JSON.parse(t.dataset.info); } catch { return; }
+    hoverCard.innerHTML = `<span class="hk">${esc(info.k)}</span> ` +
+      `<span class="hv">${esc(info.v || "")}</span>` +
+      (info.d ? `<dl>${Object.entries(info.d).map(([a, b]) =>
+        `<dt>${esc(a)}</dt><dd>${esc(b)}</dd>`).join("")}</dl>` : "");
+    hoverCard.style.display = "block";
+    const pad = 14;
+    let x = ev.clientX + pad, y = ev.clientY + pad;
+    const r = hoverCard.getBoundingClientRect();
+    if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - pad;
+    if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - pad;
+    hoverCard.style.left = x + "px";
+    hoverCard.style.top = y + "px";
+  });
+
+  function infoAttr(kind, value, details) {
+    return ` data-info="${escAttr(JSON.stringify({ k: kind, v: value, d: details || null }))}"`;
+  }
+
+  /* ---------- shared: hotspot + region overlay builders ---------- */
+  function hotspotDivs(fig, onClick) {
+    return (fig.hotspots || []).map((h) => {
+      const [x0, y0, x1, y1] = h.box;
+      const d = document.createElement("div");
+      d.className = "hotspot";
+      d.style.cssText = `left:${x0 * 100}%;top:${y0 * 100}%;` +
+        `width:${(x1 - x0) * 100}%;height:${(y1 - y0) * 100}%`;
+      d.dataset.seq = h.partSequence || "";
+      const entry = bySeq.get(h.partSequence);
+      d.innerHTML = `<span class="tag">${esc(h.index)}` +
+        (h.partNumber ? ` \u00b7 ${esc(h.partNumber)}` : "") + `</span>`;
+      d.setAttribute("data-info", JSON.stringify({
+        k: "Callout " + h.index,
+        v: h.partNumber || "",
+        d: entry ? { part: entry.partNumberRaw, description: (entry.nomenclature || "").slice(0, 70),
+                     qty: entry.unitsPerAssemblyRaw, smr: entry.smrRaw } : null,
+      }));
+      if (onClick) d.addEventListener("click", (ev) => { ev.stopPropagation(); onClick(h); });
+      return d;
+    });
+  }
+
+  function regionLayer(fig, onClick) {
+    const t = twinByFig.get(String(fig.figureNumber) + "|" + String(fig.sheetNumber || ""));
+    if (!t || !t.parts || !t.parts.length) return null;
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("class", "region-layer");
+    svg.setAttribute("viewBox", "0 0 1 1");
+    svg.setAttribute("preserveAspectRatio", "none");
+    for (const p of t.parts) {
+      if (p.leader) {
+        const ln = document.createElementNS(NS, "line");
+        ln.setAttribute("x1", p.leader.from[0]); ln.setAttribute("y1", p.leader.from[1]);
+        ln.setAttribute("x2", p.leader.to[0]); ln.setAttribute("y2", p.leader.to[1]);
+        svg.appendChild(ln);
+      }
+      const poly = document.createElementNS(NS, "polygon");
+      poly.setAttribute("points", p.region.map((pt) => pt.join(",")).join(" "));
+      poly.dataset.seq = p.partSequence || "";
+      const entry = bySeq.get(p.partSequence);
+      poly.setAttribute("data-info", JSON.stringify({
+        k: "Part geometry \u2014 callout " + p.index,
+        v: entry ? entry.partNumberRaw : "",
+        d: entry ? { description: (entry.nomenclature || "").slice(0, 70),
+                     tracedBy: (twin && twin.model) || "vision model" } : null,
+      }));
+      if (onClick) poly.addEventListener("click", (ev) => { ev.stopPropagation(); onClick(p); });
+      svg.appendChild(poly);
+    }
+    return svg;
+  }
+
+  /* ================= DOCUMENT VIEW ================= */
+  const KIND_LABEL = {
+    "title-page": "title", "toc": "contents", "list-of-illustrations": "illustrations",
+    "list-of-tables": "tables", prose: "text", figure: "figure", "parts-list": "parts", blank: "",
+  };
+  function renderDocument() {
+    if (!content) {
+      el("view-document").innerHTML =
+        '<div class="empty" style="margin:auto">No structured content in this bundle \u2014 re-run extraction.</div>';
+      return;
+    }
+    const flow = el("doc-flow");
+    const nav = el("doc-nav");
+    const navBits = [];
+    const flowBits = [];
+    for (const page of content.pages) {
+      if (page.kind === "blank") continue;
+      const anchor = "docpage-" + page.pageNumber;
+      const label = KIND_LABEL[page.kind] || page.kind;
+      let navTitle = "";
+      flowBits.push(`<div class="doc-page" id="${anchor}">`);
+      flowBits.push(`<div class="page-tag"${infoAttr("Source page " + page.pageNumber,
+        "classified as " + page.kind)}>page ${page.pageNumber} \u00b7 ${esc(page.kind)}</div>`);
+
+      if (page.kind === "title-page") {
+        navTitle = "Title page";
+        flowBits.push(renderTitlePage(page));
+      } else if (page.kind === "figure") {
+        const ref = page.blocks[0] || {};
+        navTitle = "Figure " + (ref.number || "");
+        flowBits.push(renderDocFigure(ref));
+      } else if (page.kind === "parts-list") {
+        navTitle = "Parts list";
+        flowBits.push(renderDocParts(page.pageNumber));
+      } else if (page.kind === "toc" || page.kind === "list-of-illustrations" || page.kind === "list-of-tables") {
+        navTitle = KIND_LABEL[page.kind];
+        flowBits.push(page.blocks.map((b) =>
+          `<div class="blk-toc"${infoAttr("TOC entry", b.number || b.text,
+            { page: b.page, source: "page " + page.pageNumber })}>` +
+          `<span class="tnum">${esc(b.number)}</span><span>${esc(b.text)}</span>` +
+          `<span class="tdots"></span><span class="tpage">${esc(b.page)}</span></div>`).join(""));
+      } else {
+        const h1 = page.blocks.find((b) => b.type === "heading");
+        navTitle = h1 ? (h1.number ? h1.number + " " : "") + h1.text : "text";
+        flowBits.push(page.blocks.map((b) => renderProseBlock(b, page.pageNumber)).join(""));
+      }
+      flowBits.push("</div>");
+      navBits.push(`<div class="nav-entry" data-target="${anchor}">` +
+        `<span class="kind">${esc(label || page.kind)}</span>` +
+        `<span>p.${page.pageNumber} ${esc(String(navTitle).slice(0, 34))}</span></div>`);
+    }
+    flow.innerHTML = flowBits.join("");
+    nav.innerHTML = navBits.join("");
+    nav.addEventListener("click", (ev) => {
+      const it = ev.target.closest(".nav-entry");
+      if (it) {
+        const target = document.getElementById(it.dataset.target);
+        if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+    // Cross-reference hyperlinks in prose: figure / part / paragraph.
+    flow.addEventListener("click", (ev) => {
+      const a = ev.target.closest("a.xref");
+      if (!a) return;
+      ev.preventDefault();
+      if (a.dataset.fig) return jumpToFigureNumber(a.dataset.fig, a.dataset.callout || "");
+      if (a.dataset.partSeq) return jumpToPart(+a.dataset.partSeq);
+      if (a.dataset.para) {
+        const t = document.getElementById("docpara-" + a.dataset.para);
+        if (t) t.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+    // Inline figure overlays: hotspots + regions on each doc figure.
+    flow.querySelectorAll(".fig-twin-wrap[data-media]").forEach((wrap) => {
+      const fig = figByMedia.get(wrap.dataset.media);
+      if (!fig) return;
+      for (const d of hotspotDivs(fig, (h) => {
+        if (h.partSequence) jumpToPart(h.partSequence);
+      })) wrap.appendChild(d);
+      const layer = regionLayer(fig, (p) => { if (p.partSequence) jumpToPart(p.partSequence); });
+      if (layer) wrap.appendChild(layer);
+    });
+  }
+
+  function renderTitlePage(page) {
+    const metaHints = [
+      ["toNumberRaw", "TO number"], ["documentTitle", "Document title"],
+      ["manualType", "Manual type"], ["publicationDate", "Publication date"],
+      ["endItemPartNumberRaw", "End item PN"], ["endItemNsnRaw", "End item NSN"],
+      ["manufacturerNameRaw", "Manufacturer"], ["contractNumbersRaw", "Contracts"],
+      ["distributionStatement", "Distribution"], ["supersedureTextRaw", "Supersedure"],
+    ];
+    const lines = page.blocks.map((b) => {
+      const text = b.text;
+      let hint = null;
+      for (const [field, label] of metaHints) {
+        const v = String(doc[field] || "");
+        if (v && (text.includes(v) || v.includes(text)) && text.length > 3) { hint = [field, label, v]; break; }
+      }
+      const cls = text.length > 34 ? "small" : (/^[A-Z0-9 ,./-]+$/.test(text) && text.length > 14 ? "big" : "mid");
+      const info = hint
+        ? infoAttr("Extracted attribute: " + hint[1], hint[2], { field: hint[0], source: "title page" })
+        : infoAttr("Title page line", text, { source: "page 1" });
+      return `<div class="tl ${cls}"${info}>${esc(text)}</div>`;
+    });
+    return `<div class="paper">${lines.join("")}</div>`;
+  }
+
+  function renderDocFigure(ref) {
+    const fig = figByMedia.get(ref.mediaKey) || {};
+    const src = fig.vectorKey || ref.mediaKey;
+    const hsCount = (fig.hotspots || []).length;
+    return `<div class="doc-figure">` +
+      `<div class="fig-twin-wrap" data-media="${escAttr(ref.mediaKey)}">` +
+      `<img src="${escAttr(src)}" loading="lazy" alt="Figure ${escAttr(ref.number)}"></div>` +
+      `<div class="fig-cap"${infoAttr("Figure " + ref.number, ref.text,
+        { hotspots: hsCount, rendering: fig.vectorKey ? "vector digital twin (SVG)" : "raster render" })}>` +
+      `Figure ${esc(ref.number)}. ${esc(ref.text)}</div></div>` +
+      (hsCount ? `<div class="mini-note">${hsCount} clickable callouts \u2014 click one to open the part.</div>` : "");
+  }
+
+  function renderDocParts(pageNumber) {
+    const rows = entries.filter((e) => e.pageNumber === pageNumber);
+    if (!rows.length) return '<div class="mini-note">parts rows for this page are listed under other pages</div>';
+    return `<div class="doc-parts-table"><table><thead><tr>` +
+      `<th>FIG/IDX</th><th>PART NUMBER</th><th>DESCRIPTION</th><th>QTY</th><th>SMR</th></tr></thead><tbody>` +
+      rows.map((e) => {
+        const indent = "\u2003".repeat(Math.max(0, e.indentureLevel || 0));
+        return `<tr class="part-row" data-seq="${e.sequence}"${infoAttr(
+          "Parts entry #" + e.sequence, e.partNumberRaw,
+          { parent: e.parentSequence != null ? "#" + e.parentSequence +
+              " (" + ((bySeq.get(e.parentSequence) || {}).partNumberRaw || "") + ")" : "top level",
+            indenture: e.indentureLevel, page: e.pageNumber })}>` +
+          `<td class="mono">${esc(e.figureNumberRaw)}${e.figureIndexRaw ? "/" + esc(e.figureIndexRaw) : ""}</td>` +
+          `<td class="mono">${esc(e.partNumberRaw)}</td>` +
+          `<td><span class="desc-indent">${indent}</span>${esc(e.nomenclature || e.descriptionRaw)}</td>` +
+          `<td>${esc(e.unitsPerAssemblyRaw)}</td><td class="mono">${esc(e.smrRaw)}</td></tr>`;
+      }).join("") + `</tbody></table></div>`;
+  }
+
+  // Grounded cross-reference links (content.py `links` spans) rendered as
+  // hyperlinks: figure refs open the figure (callout flashed), part refs open
+  // the part, paragraph refs scroll the document.
+  function linkedText(text, links) {
+    if (!links || !links.length) return esc(text);
+    let out = "", pos = 0;
+    for (const l of links) {
+      if (l.start < pos || l.end > text.length) continue;
+      out += esc(text.slice(pos, l.start));
+      const seg = esc(text.slice(l.start, l.end));
+      if (l.type === "figure") {
+        out += `<a class="xref" data-fig="${escAttr(l.target)}"` +
+          (l.callout ? ` data-callout="${escAttr(l.callout)}"` : "") +
+          ` title="Open figure ${escAttr(l.target)}">${seg}</a>`;
+      } else if (l.type === "part") {
+        out += `<a class="xref part" data-part-seq="${l.sequence}"` +
+          ` title="Open part ${escAttr(l.target)}">${seg}</a>`;
+      } else if (l.type === "paragraph") {
+        out += `<a class="xref" data-para="${escAttr(l.target)}"` +
+          ` title="Go to paragraph ${escAttr(l.target)}">${seg}</a>`;
+      } else {
+        out += seg;
+      }
+      pos = l.end;
+    }
+    return out + esc(text.slice(pos));
+  }
+
+  function renderProseBlock(b, pageNumber) {
+    const src = { source: "page " + pageNumber };
+    if (b.type === "heading") {
+      const tag = Math.min(4, Math.max(2, (b.level || 2)));
+      return `<h${tag} class="blk-heading"${b.number ? ` id="docpara-${escAttr(b.number)}"` : ""}` +
+        `${infoAttr("Heading", b.text, { number: b.number, ...src })}>` +
+        (b.number ? `<span class="hnum">${esc(b.number)}</span>` : "") + esc(b.text) + `</h${tag}>`;
+    }
+    if (b.type === "paragraph") {
+      return `<p class="blk-para"${b.number ? ` id="docpara-${escAttr(b.number)}"` : ""}` +
+        `${infoAttr("Paragraph" + (b.number ? " " + b.number : ""),
+        b.text.slice(0, 90) + "\u2026", { ...src, crossRefs: (b.links || []).length })}>` +
+        (b.number ? `<span class="pnum">${esc(b.number)}</span>` : "") +
+        linkedText(b.text, b.links) + `</p>`;
+    }
+    if (b.type === "admonition") {
+      return `<div class="blk-adm ${esc(b.kind)}"${infoAttr(b.kind.toUpperCase(), b.text.slice(0, 90), src)}>` +
+        `<span class="adm-kind">${esc(b.kind)}</span>${linkedText(b.text, b.links)}</div>`;
+    }
+    if (b.type === "figure-caption" || b.type === "table-caption" || b.type === "foldout") {
+      return `<p class="blk-para"${infoAttr(b.type, b.number, src)}><span class="pnum">${esc(b.number)}</span>` +
+        `${esc(b.text)}</p>`;
+    }
+    return "";
+  }
+
+  function jumpToPart(seq) {
+    document.querySelector('#tabs button[data-view="figures"]').click();
+    selectPart(seq, { jumpToFigure: true, scrollTable: true });
+  }
+
+  function jumpToFigureNumber(figNumber, callout) {
+    const gi = groups.findIndex((g) => String(g.figureNumber) === String(figNumber));
+    if (gi < 0) return;
+    let focusSeq = 0;
+    if (callout) {
+      const hit = entries.find((e) => String(e.figureNumberRaw) === String(figNumber) &&
+        String(e.figureIndexRaw).split("/")[0].trim() === String(callout));
+      if (hit) focusSeq = hit.sequence;
+    }
+    document.querySelector('#tabs button[data-view="figures"]').click();
+    selectGroup(gi, 0, focusSeq);
+    if (focusSeq) selectPart(focusSeq, { scrollTable: true });
+  }
+
+  /* ================= FIGURES VIEW ================= */
+  function makeStage(stageEl, innerEl, imgEl) {
+    const s = { scale: 1, tx: 0, ty: 0 };
+    function apply() {
+      innerEl.style.transform = `translate(${s.tx}px, ${s.ty}px) scale(${s.scale})`;
+    }
+    function fit() {
+      const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+      if (!iw || !ih) return;
+      const r = stageEl.getBoundingClientRect();
+      s.scale = Math.min(r.width / iw, r.height / ih) * 0.97;
+      s.tx = (r.width - iw * s.scale) / 2;
+      s.ty = (r.height - ih * s.scale) / 2;
+      apply();
+    }
+    stageEl.addEventListener("wheel", (ev) => {
+      ev.preventDefault();
+      const r = stageEl.getBoundingClientRect();
+      const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+      const factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const ns = Math.min(12, Math.max(0.05, s.scale * factor));
+      s.tx = mx - ((mx - s.tx) / s.scale) * ns;
+      s.ty = my - ((my - s.ty) / s.scale) * ns;
+      s.scale = ns;
+      apply();
+    }, { passive: false });
+    let drag = null;
+    stageEl.addEventListener("pointerdown", (ev) => {
+      if (ev.target.closest(".hotspot, .comp-box, polygon")) return;
+      drag = { x: ev.clientX, y: ev.clientY, tx: s.tx, ty: s.ty };
+      stageEl.classList.add("panning");
+      stageEl.setPointerCapture(ev.pointerId);
+    });
+    stageEl.addEventListener("pointermove", (ev) => {
+      if (!drag) return;
+      s.tx = drag.tx + ev.clientX - drag.x;
+      s.ty = drag.ty + ev.clientY - drag.y;
+      apply();
+    });
+    stageEl.addEventListener("pointerup", () => { drag = null; stageEl.classList.remove("panning"); });
+    return {
+      fit,
+      hundred() { s.scale = 1; apply(); },
+      focusFraction(box) {
+        const iw = imgEl.naturalWidth, ih = imgEl.naturalHeight;
+        const r = stageEl.getBoundingClientRect();
+        const cx = ((box[0] + box[2]) / 2) * iw, cy = ((box[1] + box[3]) / 2) * ih;
+        s.scale = Math.max(s.scale, 1.2);
+        s.tx = r.width / 2 - cx * s.scale;
+        s.ty = r.height / 2 - cy * s.scale;
+        apply();
+      },
+    };
+  }
+
+  const figStage = makeStage(el("fig-stage"), el("fig-inner"), el("fig-img"));
+  let curGroup = 0, curSheet = 0, showHotspots = true, showRegions = true, preferVector = true;
+
+  function sheetFig(g, sheet) {
+    return figByMedia.get(g.sheets[sheet].mediaKey) || {};
+  }
+
+  const figList = el("fig-list");
+  // Hotspot coverage: every parts-joined figure must carry linked callouts.
+  const partsGroups = groups.filter((g) => partsForFigure(g.figureNumber).length);
+  const linkedGroups = partsGroups.filter((g) => g.sheets.some((sh) =>
+    ((figByMedia.get(sh.mediaKey) || {}).hotspots || []).some((h) => h.partSequence)));
+  const missing = partsGroups.filter((g) => !linkedGroups.includes(g));
+  const coverageHtml = partsGroups.length
+    ? `<div class="coverage-banner">Hotspot coverage: ` +
+      `<span class="${missing.length ? "warn" : "ok"}">${linkedGroups.length}/${partsGroups.length}` +
+      ` parts figures linked</span>` +
+      (missing.length ? ` \u2014 missing: ${missing.map((g) => esc(g.figureNumber)).join(", ")}` : "") +
+      `</div>`
+    : "";
+  figList.innerHTML = coverageHtml + groups.map((g, i) => {
+    const linked = g.sheets.reduce((n, sh) =>
+      n + ((figByMedia.get(sh.mediaKey) || {}).hotspots || []).filter((h) => h.partSequence).length, 0);
+    const twinned = g.sheets.some((sh) => {
+      const f = figByMedia.get(sh.mediaKey) || {};
+      return twinByFig.has(String(f.figureNumber) + "|" + String(f.sheetNumber || ""));
+    });
+    return `<div class="item" data-i="${i}">
+      <span class="num">Figure ${esc(g.figureNumber)}</span> ${esc(g.figureTitle)}
+      <div class="meta">${g.sheetCount > 1 ? g.sheetCount + " sheets \u00b7 " : ""}` +
+      `${partsForFigure(g.figureNumber).length} parts \u00b7 ${linked} hotspots` +
+      (twinned ? " \u00b7 traced" : "") + `</div></div>`;
+  }).join("") || '<div class="empty">No figures</div>';
+  figList.addEventListener("click", (ev) => {
+    const it = ev.target.closest(".item");
+    if (it) selectGroup(+it.dataset.i, 0);
+  });
+
+  function partsForFigure(figNumber) {
+    return entries.filter((e) => e.figureNumberRaw === figNumber);
+  }
+
+  function selectGroup(i, sheet, focusSeq) {
+    curGroup = i; curSheet = sheet;
+    const g = groups[i];
+    figList.querySelectorAll(".item").forEach((n, k) => n.classList.toggle("active", k === i));
+    el("fig-caption").textContent = `Figure ${g.figureNumber} \u2014 ${g.figureTitle}` +
+      (g.sheetCount > 1 ? ` (sheet ${sheet + 1} of ${g.sheetCount})` : "");
+    el("sheet-tabs").innerHTML = g.sheetCount > 1
+      ? g.sheets.map((_, k) =>
+          `<button class="sheet-tab${k === sheet ? " active" : ""}" data-k="${k}">Sheet ${k + 1}</button>`).join(" ")
+      : "";
+    el("sheet-tabs").querySelectorAll(".sheet-tab").forEach((b) =>
+      b.addEventListener("click", () => selectGroup(i, +b.dataset.k)));
+    const fig = sheetFig(g, sheet);
+    const img = el("fig-img");
+    img.onload = () => { figStage.fit(); renderFigOverlay(); if (focusSeq) flashPartHotspot(focusSeq); };
+    img.src = (preferVector && fig.vectorKey) || g.sheets[sheet].mediaKey;
+    renderFigParts(g.figureNumber);
+  }
+
+  function renderFigOverlay() {
+    const g = groups[curGroup];
+    const fig = sheetFig(g, curSheet);
+    const overlay = el("fig-overlay");
+    overlay.innerHTML = "";
+    const img = el("fig-img");
+    overlay.style.cssText =
+      `position:absolute;left:0;top:0;width:${img.naturalWidth}px;height:${img.naturalHeight}px`;
+    if (showRegions) {
+      const layer = regionLayer(fig, (p) => {
+        if (p.partSequence) selectPart(p.partSequence, { scrollTable: true });
+      });
+      if (layer) overlay.appendChild(layer);
+    }
+    if (showHotspots) {
+      for (const d of hotspotDivs(fig, (h) => {
+        if (h.partSequence) selectPart(h.partSequence, { scrollTable: true });
+      })) overlay.appendChild(d);
+    }
+  }
+
+  function renderFigParts(figNumber) {
+    const rows = partsForFigure(figNumber);
+    el("fig-parts-title").textContent =
+      `Parts on figure ${figNumber} (${rows.length})`;
+    el("fig-parts-body").innerHTML = rows.map((e) => partRowHtml(e, false)).join("") ||
+      '<tr><td colspan="5" class="empty">No parts parsed for this figure</td></tr>';
+    bindPartRows(el("fig-parts-body"));
+  }
+
+  function partRowHtml(e, withFig) {
+    const indent = "\u2003".repeat(Math.max(0, e.indentureLevel || 0));
+    return `<tr class="part-row" data-seq="${e.sequence}">` +
+      (withFig ? `<td class="mono">${esc(e.figureNumberRaw)}</td>` : "") +
+      `<td class="idx-chip mono">${esc(e.figureIndexRaw)}</td>` +
+      `<td class="mono">${esc(e.partNumberRaw)}</td>` +
+      (withFig ? `<td class="mono">${esc(e.refDesRaw)}</td><td class="mono">${esc(e.cageRaw)}</td>` : "") +
+      `<td><span class="desc-indent">${indent}</span>${esc(e.descriptionRaw)}</td>` +
+      `<td>${esc(e.unitsPerAssemblyRaw)}</td><td class="mono">${esc(e.smrRaw)}</td>` +
+      (withFig ? `<td class="mono">${esc(e.nsnRaw)}</td><td class="mono">${esc(e.usableOnCodeRaw)}</td>` : "") +
+      `</tr>`;
+  }
+
+  function bindPartRows(tbody) {
+    tbody.querySelectorAll("tr.part-row").forEach((tr) =>
+      tr.addEventListener("click", () => selectPart(+tr.dataset.seq, { jumpToFigure: true })));
+  }
+
+  function selectPart(seq, opts) {
+    const e = bySeq.get(seq);
+    if (!e) return;
+    document.querySelectorAll("tr.part-row").forEach((tr) =>
+      tr.classList.toggle("selected", +tr.dataset.seq === seq));
+    showPartDetail(e);
+    if (opts && opts.scrollTable) {
+      const tr = el("fig-parts-body").querySelector(`tr[data-seq="${seq}"]`);
+      if (tr) tr.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    if (opts && opts.jumpToFigure) {
+      const gi = groups.findIndex((g) => g.figureNumber === e.figureNumberRaw);
+      if (gi >= 0) {
+        const si = e.figureMediaKey
+          ? Math.max(0, groups[gi].sheets.findIndex((sh) => sh.mediaKey === e.figureMediaKey))
+          : 0;
+        document.querySelector('#tabs button[data-view="figures"]').click();
+        if (gi !== curGroup || si !== curSheet) selectGroup(gi, si, seq);
+        else flashPartHotspot(seq);
+      }
+    }
+  }
+
+  function flashPartHotspot(seq) {
+    const e = bySeq.get(seq);
+    if (!e || !e.calloutBox) return;
+    figStage.focusFraction(e.calloutBox);
+    const hs = el("fig-overlay").querySelector(`.hotspot[data-seq="${seq}"]`);
+    if (hs) {
+      hs.classList.remove("linked-flash");
+      void hs.offsetWidth;
+      hs.classList.add("linked-flash");
+    }
+    el("fig-overlay").querySelectorAll("polygon").forEach((p) =>
+      p.classList.toggle("hl", +p.dataset.seq === seq));
+  }
+
+  function showPartDetail(e) {
+    const d = el("part-detail");
+    d.hidden = false;
+    const parent = e.parentSequence != null ? bySeq.get(e.parentSequence) : null;
+    const kids = childrenOf.get(e.sequence) || [];
+    const fields = [
+      ["Figure / index", `${e.figureNumberRaw}${e.figureIndexRaw ? " / " + e.figureIndexRaw : ""}`],
+      ["Item name", e.itemName],
+      ["Qualifiers", (e.itemModifiers || []).join(", ")],
+      ["Spec family", e.specFamily ? e.specFamily + " (standard hardware)" : ""],
+      ["Description", e.descriptionRaw], ["CAGE", e.cageRaw], ["Ref des", e.refDesRaw],
+      ["NSN", e.nsnRaw], ["Qty per assy", e.unitsPerAssemblyRaw], ["SMR", e.smrRaw],
+      ["Usable on", e.usableOnCodeRaw], ["Row type", e.rowType],
+      ["Indenture", e.indentureLevel], ["Source page", e.pageNumber],
+      ["Parent part", parent ? `${parent.partNumberRaw} (#${parent.sequence})` : ""],
+      ["Child parts", kids.length ? kids.length + " \u2014 see Assembly tab" : ""],
+    ].filter(([, v]) => v !== "" && v != null);
+    d.innerHTML = `<div class="pn">${esc(e.partNumberRaw || e.nomenclature || "(no part number)")}</div>` +
+      `<dl>${fields.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>` +
+      (e.calloutBox ? `<div style="margin-top:8px"><a href="#" id="jump-callout">Show on figure</a></div>` : "");
+    const j = d.querySelector("#jump-callout");
+    if (j) j.addEventListener("click", (ev) => { ev.preventDefault(); selectPart(e.sequence, { jumpToFigure: true }); });
+  }
+
+  el("btn-hotspots").addEventListener("click", function () {
+    showHotspots = !showHotspots;
+    this.classList.toggle("toggled", showHotspots);
+    renderFigOverlay();
+  });
+  el("btn-regions").addEventListener("click", function () {
+    showRegions = !showRegions;
+    this.classList.toggle("toggled", showRegions);
+    renderFigOverlay();
+  });
+  el("btn-vector").addEventListener("click", function () {
+    preferVector = !preferVector;
+    this.classList.toggle("toggled", preferVector);
+    selectGroup(curGroup, curSheet);
+  });
+  el("btn-fit").addEventListener("click", figStage.fit);
+  el("btn-100").addEventListener("click", figStage.hundred);
+
+  /* ================= PARTS VIEW ================= */
+  const partsBody = el("parts-body");
+  function renderPartsTable(query) {
+    const q = (query || "").trim().toLowerCase();
+    const rows = !q ? entries : entries.filter((e) =>
+      [e.partNumberRaw, e.descriptionRaw, e.nsnRaw, e.cageRaw, e.refDesRaw,
+       e.figureNumberRaw, e.figureIndexRaw, e.smrRaw, e.usableOnCodeRaw]
+        .some((v) => v && String(v).toLowerCase().includes(q)));
+    el("parts-count").textContent = `${rows.length} of ${entries.length} rows`;
+    partsBody.innerHTML = rows.map((e) => partRowHtml(e, true)).join("");
+    bindPartRows(partsBody);
+  }
+  el("parts-search").addEventListener("input", (ev) => renderPartsTable(ev.target.value));
+  renderPartsTable("");
+
+  /* ================= ASSEMBLY VIEW ================= */
+  function renderAssembly() {
+    const roots = entries.filter((e) => e.parentSequence == null);
+    el("assembly-count").textContent =
+      `${entries.length} parts \u00b7 ${roots.length} top-level assemblies \u00b7 ` +
+      `every node is an individual item related to its parent`;
+    const nodeHtml = (e) => {
+      const kids = (childrenOf.get(e.sequence) || []);
+      const row = `<div class="tree-node" data-seq="${e.sequence}">` +
+        `<span class="t-pn">${esc(e.partNumberRaw || "\u2014")}</span>` +
+        `<span class="t-qty">${esc(e.unitsPerAssemblyRaw || "")}</span>` +
+        `<span class="t-desc">${esc((e.nomenclature || e.descriptionRaw || "").slice(0, 90))}</span>` +
+        `<span class="t-fig">fig ${esc(e.figureNumberRaw)}${e.figureIndexRaw ? "/" + esc(e.figureIndexRaw) : ""}</span>` +
+        `</div>`;
+      if (!kids.length) return `<div class="leaf">${row}</div>`;
+      return `<details class="tree-branch" open><summary>${row}</summary>` +
+        `<div class="tree-kids">${kids.map(nodeHtml).join("")}</div></details>`;
+    };
+    el("assembly-tree").innerHTML = roots.map(nodeHtml).join("") ||
+      '<div class="empty">No parts entries</div>';
+    el("assembly-tree").addEventListener("click", (ev) => {
+      const n = ev.target.closest(".tree-node");
+      if (n) { ev.preventDefault(); jumpToPart(+n.dataset.seq); }
+    });
+  }
+
+  /* ================= SCHEMATICS VIEW ================= */
+  const schStage = makeStage(el("sch-stage"), el("sch-inner"), el("sch-img"));
+  let curSch = 0, showComps = true;
+  const comps = (schematics && schematics.components) || [];
+  const nets = (schematics && schematics.nets) || [];
+  const compById = new Map(comps.map((c) => [c.id, c]));
+
+  if (!schPages.length) {
+    el("view-schematics").innerHTML =
+      '<div class="empty" style="margin:auto">No schematic-captioned figures were found in this document.</div>';
+  } else {
+    el("sch-list").innerHTML = schPages.map((p, i) =>
+      `<div class="item" data-i="${i}"><span class="num">Figure ${esc(p.figureNumber)}</span> ` +
+      `${esc(p.figureTitle)}<div class="meta">source page ${p.sourcePage} \u00b7 vector SVG</div></div>`).join("");
+    el("sch-list").addEventListener("click", (ev) => {
+      const it = ev.target.closest(".item");
+      if (it) selectSch(+it.dataset.i);
+    });
+    el("btn-comps").addEventListener("click", function () {
+      showComps = !showComps;
+      this.classList.toggle("toggled", showComps);
+      renderCompBoxes();
+    });
+    el("btn-sch-fit").addEventListener("click", schStage.fit);
+    el("btn-sch-100").addEventListener("click", schStage.hundred);
+    selectSch(0);
+  }
+
+  function selectSch(i) {
+    curSch = i;
+    const p = schPages[i];
+    el("sch-list").querySelectorAll(".item").forEach((n, k) => n.classList.toggle("active", k === i));
+    el("sch-caption").textContent = `Figure ${p.figureNumber} \u2014 ${p.figureTitle}`;
+    const img = el("sch-img");
+    img.onload = () => { schStage.fit(); renderCompBoxes(); };
+    img.src = p.vector;
+    renderSchTables(p.schematicPage);
+  }
+
+  function renderCompBoxes() {
+    const p = schPages[curSch];
+    const overlay = el("sch-overlay");
+    overlay.innerHTML = "";
+    if (!showComps) return;
+    const img = el("sch-img");
+    overlay.style.cssText =
+      `position:absolute;left:0;top:0;width:${img.naturalWidth}px;height:${img.naturalHeight}px`;
+    const pw = p.width || img.naturalWidth, ph = p.height || img.naturalHeight;
+    for (const c of comps) {
+      if (c.page !== p.schematicPage || !c.bbox) continue;
+      const [x0, y0, x1, y1] = c.bbox;
+      const d = document.createElement("div");
+      d.className = "comp-box";
+      d.dataset.cid = c.id;
+      d.style.cssText = `left:${(x0 / pw) * 100}%;top:${(y0 / ph) * 100}%;` +
+        `width:${((x1 - x0) / pw) * 100}%;height:${((y1 - y0) / ph) * 100}%`;
+      d.innerHTML = `<span class="tag">${esc(c.refDes || c.type || c.id)}</span>`;
+      d.addEventListener("click", (ev) => { ev.stopPropagation(); highlightComp(c.id, true); });
+      overlay.appendChild(d);
+    }
+  }
+
+  function renderSchTables(pageNo) {
+    const pageComps = comps.filter((c) => c.page === pageNo);
+    el("sch-comp-body").innerHTML = pageComps.map((c) =>
+      `<tr class="comp-row" data-cid="${c.id}"><td class="mono">${esc(c.refDes || "\u2014")}</td>` +
+      `<td>${esc(c.type || "")}</td><td class="mono">${esc(c.partNumber || "")}</td>` +
+      `<td>${(c.pins || []).length}</td></tr>`).join("") ||
+      '<tr><td colspan="4" class="empty">none</td></tr>';
+    el("sch-comp-body").querySelectorAll(".comp-row").forEach((tr) =>
+      tr.addEventListener("click", () => highlightComp(tr.dataset.cid, false)));
+
+    const pageNets = nets.filter((n) => n.page === pageNo);
+    el("sch-net-body").innerHTML = pageNets.map((n) => {
+      const ends = (n.nodes || []).map((nd) => {
+        const c = compById.get(nd.component);
+        return `${(c && c.refDes) || nd.component}${nd.pin ? "." + nd.pin : ""}`;
+      }).join(" \u2194 ");
+      return `<tr class="net-row"><td class="mono">${esc(n.name || n.id)}</td>` +
+        `<td>${esc(n.gauge || "")}</td><td class="mono">${esc(ends)}</td></tr>`;
+    }).join("") || '<tr><td colspan="3" class="empty">none</td></tr>';
+
+    const warns = ((schematics && schematics.warnings) || [])
+      .filter((w) => w.startsWith(`page ${pageNo}:`));
+    el("sch-warnings").innerHTML = warns.map((w) => `<li>${esc(w)}</li>`).join("") ||
+      "<li>none for this page</li>";
+  }
+
+  function highlightComp(cid, scrollTable) {
+    el("sch-comp-body").querySelectorAll(".comp-row").forEach((tr) =>
+      tr.classList.toggle("selected", tr.dataset.cid === cid));
+    el("sch-overlay").querySelectorAll(".comp-box").forEach((b) =>
+      b.classList.toggle("hl", b.dataset.cid === cid));
+    if (scrollTable) {
+      const tr = el("sch-comp-body").querySelector(`tr[data-cid="${cid}"]`);
+      if (tr) tr.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  /* ================= INFO VIEW ================= */
+  const info = el("info-wrap");
+  const docFields = Object.entries(doc).filter(([, v]) => v !== "" && v != null);
+  const triage = bom.triage || {};
+  const src = bom.source || {};
+  const contentStats = content
+    ? { pageCount: content.pageCount, ...content.pageKinds, blocks: JSON.stringify(content.blockCounts) }
+    : {};
+  const twinStats = twin ? twin.stats : {};
+  info.innerHTML =
+    `<div class="info-card"><h2>Title page attributes</h2><dl>` +
+    docFields.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") + `</dl></div>` +
+    `<div class="info-card"><h2>Extraction</h2><dl>` +
+    Object.entries(stats).map(([k, v]) =>
+      `<dt>${esc(k)}</dt><dd>${esc(typeof v === "object" ? JSON.stringify(v) : v)}</dd>`).join("") +
+    Object.entries(triage).map(([k, v]) => `<dt>triage.${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") +
+    Object.entries(src).map(([k, v]) => `<dt>source.${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") +
+    `</dl></div>` +
+    (content ? `<div class="info-card"><h2>Document content (captify.to-content.v1)</h2><dl>` +
+      Object.entries(contentStats).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") +
+      `</dl></div>` : "") +
+    (twin ? `<div class="info-card"><h2>Drawing twin (captify.drawing-twin.v1)</h2><dl>` +
+      `<dt>model</dt><dd>${esc(twin.model)}</dd>` +
+      Object.entries(twinStats).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") +
+      `<dt>3D slots</dt><dd>every assembly node reserves mesh / transform3d / boundingBox3d for the 2D\u21923D stage</dd>` +
+      `</dl></div>` : "") +
+    (DATA.sourcePdf
+      ? `<div class="info-card"><h2>Original document</h2>` +
+        `<a href="${esc(DATA.sourcePdf)}" target="_blank">Open the source PDF</a></div>`
+      : "");
+
+  /* first render */
+  renderDocument();
+  renderAssembly();
+  if (groups.length) selectGroup(0, 0);
+})();
+</script>
+</body>
+</html>

@@ -1,16 +1,18 @@
-ARG BASE_IMAGE=quay.io/sclorg/python-312-c9s:c9s
+ARG BASE_IMAGE=quay.io/sclorg/python-312-c9s:c9s@sha256:012a2fe921fbbf6a297c6ff4827ed73b5dd21e08ccc34e4015586f97b17985fc
 
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.8.19
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc
 
 ARG UV_SYNC_EXTRA_ARGS=""
 
-ARG MIMALLOC_VERSION=v3.2.8
+ARG MIMALLOC_VERSION=v3.4.1
+ARG MIMALLOC_COMMIT=927e97f0df3225710fa724104bba29d3d9037e71
 
 # ngspice built as a shared library (libngspice) for PySpice's in-process binding,
 # which backs schematic SPICE simulation. ngspice is not packaged for EL9, so it is
 # compiled from the upstream release here (like mimalloc) and the .so copied into
 # the final image — no ngspice CLI, no EPEL.
-ARG NGSPICE_VERSION=44
+ARG NGSPICE_VERSION=46
+ARG NGSPICE_SHA256=a0d1699af1940b06649276dcd6ff5a566c8c0cad01b2f7b5e99dedbb4d64c19b
 
 
 ###################################################################################################
@@ -20,12 +22,15 @@ ARG NGSPICE_VERSION=44
 FROM ${BASE_IMAGE} AS mimalloc
 
 ARG MIMALLOC_VERSION
+ARG MIMALLOC_COMMIT
 
 USER 0
 
 RUN dnf install -y --best --nodocs --setopt=install_weak_deps=False gcc gcc-c++ make cmake git
 
-RUN git clone --depth 1 --branch ${MIMALLOC_VERSION} https://github.com/microsoft/mimalloc.git /opt/app-root/src/mimalloc
+RUN git clone --filter=blob:none --no-checkout https://github.com/microsoft/mimalloc.git /opt/app-root/src/mimalloc && \
+    git -C /opt/app-root/src/mimalloc checkout --detach ${MIMALLOC_COMMIT} && \
+    test "$(git -C /opt/app-root/src/mimalloc describe --tags --exact-match)" = "${MIMALLOC_VERSION}"
 
 WORKDIR /opt/app-root/src/mimalloc
 
@@ -42,24 +47,25 @@ RUN cmake ../.. && make
 FROM ${BASE_IMAGE} AS ngspice
 
 ARG NGSPICE_VERSION
+ARG NGSPICE_SHA256
 
 USER 0
 
 RUN dnf install -y --best --nodocs --setopt=install_weak_deps=False \
     gcc make bison flex tar gzip autoconf automake libtool
 
-# The GitHub source archive is a raw git tree (no generated ./configure), so the
-# build bootstraps autotools via ./autogen.sh first.
-ADD https://github.com/imr/ngspice/archive/refs/tags/ngspice-${NGSPICE_VERSION}.tar.gz /tmp/ngspice.tar.gz
+# Use the official release archive, which includes a generated ./configure.
+# This avoids requiring a newer Autoconf than the pinned EL9 base provides.
+ADD https://downloads.sourceforge.net/project/ngspice/ng-spice-rework/${NGSPICE_VERSION}/ngspice-${NGSPICE_VERSION}.tar.gz /tmp/ngspice.tar.gz
 
-RUN mkdir -p /tmp/ngspice-src && \
+RUN echo "${NGSPICE_SHA256}  /tmp/ngspice.tar.gz" | sha256sum -c - && \
+    mkdir -p /tmp/ngspice-src && \
     tar -xzf /tmp/ngspice.tar.gz -C /tmp/ngspice-src --strip-components=1
 
 WORKDIR /tmp/ngspice-src
 # --with-ngshared builds libngspice.so (the cffi target PySpice loads); no CLI,
 # no X11/GUI. Installs into /usr/local/lib.
-RUN ./autogen.sh && \
-    ./configure --with-ngshared --disable-debug --without-x \
+RUN ./configure --with-ngshared --disable-debug --without-x \
         --prefix=/usr/local CFLAGS="-O2" && \
     make -j"$(nproc)" && \
     make install
@@ -81,6 +87,12 @@ RUN --mount=type=bind,source=os-packages.txt,target=/tmp/os-packages.txt \
     dnf install -y $(cat /tmp/os-packages.txt) && \
     dnf -y clean all && \
     rm -rf /var/cache/dnf
+
+# Legacy .doc/.xls/.ppt ingestion requires a resolvable distro launcher plus
+# util-linux prlimit for the kernel-enforced RLIMIT_FSIZE boundary.
+RUN test -x "$(readlink -f "$(command -v soffice)")" && \
+    prlimit --version && \
+    "$(readlink -f "$(command -v soffice)")" --headless --version
 
 COPY --from=mimalloc /opt/app-root/src/mimalloc/out/release/libmimalloc.so /usr/local/lib/libmimalloc.so
 
@@ -165,6 +177,7 @@ RUN --security=insecure \
 USER 1001
 
 COPY --chown=1001:0 ./docling_serve ./docling_serve
+COPY --chown=1001:0 ./scripts/smoke_legacy_office_runtime.py ./scripts/smoke_legacy_office_runtime.py
 
 RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
@@ -187,7 +200,8 @@ ENV NGSPICE_LIBRARY_PATH=/usr/local/lib/libngspice.so
 ENV \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    HF_DATASETS_OFFLINE=1
+    HF_DATASETS_OFFLINE=1 \
+    DOCLING_SERVE_UPLOAD_STAGING_MODE=required
 
 EXPOSE 5001
 

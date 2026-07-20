@@ -75,14 +75,18 @@ def build_graph_config(template_override: str | None = None) -> _GraphConfig | N
     different proxy/model than the rest of the service.
     """
     s = docling_serve_settings
-    base_url = (
-        getattr(s, "graph_litellm_base_url", None) or getattr(s, "litellm_base_url", None)
+    base_url = getattr(s, "graph_litellm_base_url", None) or getattr(
+        s, "litellm_base_url", None
     )
-    api_key = getattr(s, "graph_litellm_api_key", None) or getattr(s, "litellm_api_key", None)
+    api_key = getattr(s, "graph_litellm_api_key", None) or getattr(
+        s, "litellm_api_key", None
+    )
     if not base_url or not api_key:
         return None
     template = (
-        template_override or getattr(s, "graph_extraction_template", None) or _DEFAULT_TEMPLATE
+        template_override
+        or getattr(s, "graph_extraction_template", None)
+        or _DEFAULT_TEMPLATE
     )
     return _GraphConfig(
         base_url=str(base_url),
@@ -99,7 +103,10 @@ def build_graph_config(template_override: str | None = None) -> _GraphConfig | N
 
 
 def run_graph_extraction(
-    source_path: Path, cfg: _GraphConfig, *, identity_headers: dict[str, str] | None = None
+    source_path: Path,
+    cfg: _GraphConfig,
+    *,
+    identity_headers: dict[str, str] | None = None,
 ) -> tuple[Any, int]:
     """Run docling-graph through LiteLLM; return ``(networkx graph, model count)``.
 
@@ -151,7 +158,9 @@ def run_graph_extraction(
     try:
         ctx = dg.run_pipeline(pipeline_config.to_dict())
     except Exception as err:
-        raise GraphExtractionUnavailable(f"graph_run_failed: {type(err).__name__}") from err
+        raise GraphExtractionUnavailable(
+            f"graph_run_failed: {type(err).__name__}"
+        ) from err
 
     graph = getattr(ctx, "knowledge_graph", None)
     if graph is None:
@@ -161,7 +170,10 @@ def run_graph_extraction(
 
 
 def graph_payload_from_text(
-    text: str, *, template: str | None = None, identity_headers: dict[str, str] | None = None
+    text: str,
+    *,
+    template: str | None = None,
+    identity_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Extract a knowledge graph from raw markdown/text (stateless entry point).
 
@@ -271,7 +283,9 @@ def _graph_to_payload(graph: Any) -> dict[str, Any]:
         edge_label = attrs.get("label")
         if edge_label:
             edge_labels[edge_label] = edge_labels.get(edge_label, 0) + 1
-        properties = {k: v for k, v in attrs.items() if k != "label" and v not in (None, "")}
+        properties = {
+            k: v for k, v in attrs.items() if k != "label" and v not in (None, "")
+        }
         edges.append(
             {
                 "source": str(source),

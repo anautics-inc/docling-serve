@@ -352,9 +352,7 @@ def trace_nets(
         for index in members:
             touched.update(pieces[index].touched)
             piece = pieces[index]
-            run_length += math.hypot(
-                piece.b[0] - piece.a[0], piece.b[1] - piece.a[1]
-            )
+            run_length += math.hypot(piece.b[0] - piece.a[0], piece.b[1] - piece.a[1])
         if len(touched) < 2 and not (
             # A substantial run touching ONE component is an off-page net
             # (continues on another sheet via a TO/FROM SHEET flag) — keep
@@ -394,6 +392,9 @@ def _attachment_points(
             box = boxes[box_index]
             point = min((piece.a, piece.b), key=box.distance)
             bucket = by_ref.setdefault(box.ref, [])
-            if all(math.dist(point, existing) >= _ATTACHMENT_MERGE_PT for existing in bucket):
+            if all(
+                math.dist(point, existing) >= _ATTACHMENT_MERGE_PT
+                for existing in bucket
+            ):
                 bucket.append(point)
     return by_ref

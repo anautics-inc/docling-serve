@@ -1,0 +1,1 @@
+.model IRF9530 PMOS(VTO=-3.7)

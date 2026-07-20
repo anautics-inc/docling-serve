@@ -15,10 +15,22 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from docling_serve.upload_staging import redact_sensitive_text
+
 # Context variable to store request-scoped log data
 _log_context: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
     "log_context", default={}
 )
+
+
+def _redact_log_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {key: _redact_log_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_log_value(item) for item in value]
+    return value
 
 
 class ColoredLogFormatter(logging.Formatter):
@@ -36,7 +48,7 @@ class ColoredLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLOR_CODES.get(record.levelno, "")
         record.levelname = f"{color}{record.levelname}{self.RESET_CODE}"
-        return super().format(record)
+        return redact_sensitive_text(super().format(record))
 
 
 def get_log_context() -> dict[str, Any]:
@@ -114,7 +126,7 @@ class JSONLogFormatter(logging.Formatter):
             ]:
                 log_entry[key] = value
 
-        return json.dumps(log_entry, default=str)
+        return json.dumps(_redact_log_value(log_entry), default=str)
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         """Format timestamp in ISO 8601 format."""
@@ -157,7 +169,7 @@ class LogContextMiddleware(BaseHTTPMiddleware):
                 # Remove prefix from header name for cleaner log field names
                 # e.g., "X-Docling-Log-RequestID" -> "RequestID"
                 field_name = header_name[len(self.header_prefix) :]
-                context[field_name] = header_value
+                context[field_name] = redact_sensitive_text(header_value)
 
         # Set the context for this request. The contextvar lives only in
         # this task, so it dies with the task when the request finishes —

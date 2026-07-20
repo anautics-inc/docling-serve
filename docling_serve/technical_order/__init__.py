@@ -2,7 +2,7 @@
 
 Pure functions over a PDF path — no service dependencies — so every module is
 testable offline and reusable by the extractor, scripts, and tests. The
-assembled output is the ``captify.bom.v1`` bundle (see :mod:`bundle`).
+assembled output is the additive ``captify.bom.v2`` bundle (see :mod:`bundle`).
 """
 
 from docling_serve.technical_order.bundle import build_bom_payload

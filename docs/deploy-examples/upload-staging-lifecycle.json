@@ -1,0 +1,76 @@
+{
+  "Rules": [
+    {
+      "ID": "docling-staging-expiration",
+      "Status": "Enabled",
+      "Filter": {
+        "And": {
+          "Prefix": "docling-staging/v1/",
+          "Tags": [
+            {
+              "Key": "docling-staging",
+              "Value": "true"
+            }
+          ]
+        }
+      },
+      "Expiration": {
+        "Days": 1
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    },
+    {
+      "ID": "docling-staging-cleanup-expiration",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "docling-staging-cleanup/v1/queue/"
+      },
+      "Expiration": {
+        "Days": 7
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 7
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    },
+    {
+      "ID": "docling-staging-dead-letter-expiration",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "docling-staging-cleanup/v1/dead/"
+      },
+      "Expiration": {
+        "Days": 30
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 30
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 30
+      }
+    },
+    {
+      "ID": "docling-staging-claim-expiration",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "docling-staging-cleanup/v1/claims/"
+      },
+      "Expiration": {
+        "Days": 1
+      },
+      "NoncurrentVersionExpiration": {
+        "NoncurrentDays": 1
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 1
+      }
+    }
+  ]
+}

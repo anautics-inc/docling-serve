@@ -16,6 +16,10 @@ from docling_jobkit.orchestrators.base_orchestrator import (
     BaseOrchestrator,
 )
 
+from docling_serve.ingestion.canonical_result import (
+    CanonicalTaskResult,
+    canonical_from_task_result,
+)
 from docling_serve.settings import docling_serve_settings
 
 
@@ -31,8 +35,12 @@ async def prepare_response(
         | PresignedUrlConvertDocumentResponse
         | PresignedUrlConvertResponse
         | ChunkDocumentResponse
+        | CanonicalTaskResult
     )
-    if isinstance(task_result.result, ExportResult):
+    canonical = canonical_from_task_result(task_result)
+    if canonical is not None:
+        response = canonical
+    elif isinstance(task_result.result, ExportResult):
         response = ConvertDocumentResponse(
             document=task_result.result.document,
             status=task_result.result.status,

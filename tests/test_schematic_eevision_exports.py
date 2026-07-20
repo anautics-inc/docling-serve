@@ -18,9 +18,9 @@ import pytest
 
 from docling_serve.schematic.edml import graph_to_edml
 from docling_serve.schematic.eevision import (
+    cavity_ids_for,
     graph_to_eevision_csv,
     net_connection_plan,
-    cavity_ids_for,
     wire_type,
 )
 
@@ -142,9 +142,7 @@ def test_csv_emits_arc_rows_for_internal_connections() -> None:
     assert {arc["A-Cav"], arc["B-Cav"]} == {"A2", "B2"}
     # The wire rows themselves never pair a component with itself any more.
     wire_rows = [r for r in rows if r["Wire"] and r["Type"] != "ARC"]
-    assert all(
-        not (r["A-Comp"] and r["A-Comp"] == r["B-Comp"]) for r in wire_rows
-    )
+    assert all(not (r["A-Comp"] and r["A-Comp"] == r["B-Comp"]) for r in wire_rows)
 
 
 def test_csv_keeps_no_wire_rows_for_unconnected_components() -> None:

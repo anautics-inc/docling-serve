@@ -11,7 +11,6 @@ from docling.datamodel.service.requests import (
 )
 from docling.datamodel.service.targets import InBodyTarget, PresignedUrlTarget, S3Target
 
-from docling_serve.datamodel.convert import ConvertDocumentsRequestOptions
 from docling_serve.policy import (
     ALL_TARGET_TYPES,
     build_service_policy,
@@ -23,10 +22,6 @@ from docling_serve.policy import (
     validate_target_kind,
 )
 from docling_serve.settings import DoclingServeSettings
-
-
-def test_convert_options_shim_points_to_shared_type():
-    assert ConvertDocumentsRequestOptions is ConvertDocumentsOptions
 
 
 def test_page_range_serializes_to_json_array():
@@ -135,7 +130,7 @@ def test_validate_convert_options_allows_configured_image_mode():
     )
 
     # Should reject others
-    with pytest.raises(HTTPException, match="image_export_mode.*not allowed"):
+    with pytest.raises(HTTPException, match=r"image_export_mode.*not allowed"):
         validate_convert_options(
             ConvertDocumentsOptions(image_export_mode="referenced"), policy
         )

@@ -58,7 +58,9 @@ IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 _NUMBER_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 _TRANSFORM_RE = re.compile(r"(matrix|translate|scale|rotate)\s*\(([^)]*)\)")
-_PATH_COMMAND_RE = re.compile(r"([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)")
+_PATH_COMMAND_RE = re.compile(
+    r"([MmLlHhVvCcSsQqTtAaZz])|([-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?)"
+)
 
 
 class KicadConversionError(ValueError):
@@ -155,10 +157,11 @@ def _flatten_cubic(
     p3: tuple[float, float],
 ) -> list[tuple[float, float]]:
     """Approximate a cubic Bézier with line segments (excludes ``p0``)."""
-    net_length = (
-        math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)
+    net_length = math.dist(p0, p1) + math.dist(p1, p2) + math.dist(p2, p3)
+    segments = max(
+        2,
+        min(MAX_CURVE_SEGMENTS, math.ceil(math.sqrt(net_length / CURVE_TOLERANCE_PT))),
     )
-    segments = max(2, min(MAX_CURVE_SEGMENTS, math.ceil(math.sqrt(net_length / CURVE_TOLERANCE_PT))))
     points: list[tuple[float, float]] = []
     for step in range(1, segments + 1):
         t = step / segments
@@ -309,7 +312,12 @@ def parse_path_data(d: str) -> list[tuple[list[tuple[float, float]], bool]]:
             prev_cubic_ctrl = prev_quad_ctrl = None
         elif op in _CURVE_ARITY:
             points, pos, prev_cubic_ctrl, prev_quad_ctrl = _trace_curve(
-                op, read(_CURVE_ARITY[op]), pos, (ox, oy), prev_cubic_ctrl, prev_quad_ctrl
+                op,
+                read(_CURVE_ARITY[op]),
+                pos,
+                (ox, oy),
+                prev_cubic_ctrl,
+                prev_quad_ctrl,
             )
             current.extend(points)
         elif op == "A":
@@ -372,10 +380,7 @@ def _is_page_background(
     """True when a filled shape covers (almost) the whole page."""
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
-    return (
-        (max(xs) - min(xs)) >= 0.95 * width
-        and (max(ys) - min(ys)) >= 0.95 * height
-    )
+    return (max(xs) - min(xs)) >= 0.95 * width and (max(ys) - min(ys)) >= 0.95 * height
 
 
 #: Longest dimension (pt) a filled path may have and still replay as a filled
@@ -416,13 +421,19 @@ def _page_dimensions(root: ET.Element) -> tuple[float, float]:
 class _GeometryWalker:
     """Recursive SVG tree walk that accumulates page-space shapes."""
 
-    _SKIPPED_TAGS = frozenset({"defs", "clipPath", "mask", "symbol", "metadata", "style"})
+    _SKIPPED_TAGS = frozenset(
+        {"defs", "clipPath", "mask", "symbol", "metadata", "style"}
+    )
 
-    def __init__(self, defs_table: dict[str, ET.Element], geometry: _SvgGeometry) -> None:
+    def __init__(
+        self, defs_table: dict[str, ET.Element], geometry: _SvgGeometry
+    ) -> None:
         self._defs = defs_table
         self._geometry = geometry
 
-    def walk(self, element: ET.Element, ctm: Matrix, inherited_fill: str | None) -> None:
+    def walk(
+        self, element: ET.Element, ctm: Matrix, inherited_fill: str | None
+    ) -> None:
         name = _localname(element)
         if name in self._SKIPPED_TAGS:
             return
@@ -436,7 +447,9 @@ class _GeometryWalker:
             for child in element:
                 self.walk(child, matrix, fill)
 
-    def _expand_use(self, element: ET.Element, matrix: Matrix, fill: str | None) -> None:
+    def _expand_use(
+        self, element: ET.Element, matrix: Matrix, fill: str | None
+    ) -> None:
         href = element.get(XLINK_HREF) or element.get("href") or ""
         target = self._defs.get(href.lstrip("#"))
         if target is None:
@@ -553,10 +566,12 @@ def _shape_to_sexpr(shape: _Shape) -> str | None:
         r, g, b = shape.color
         stroke += f" (color {r} {g} {b} 1)"
     stroke += ")"
-    fill = "(fill (type outline))" if shape.filled and shape.closed else "(fill (type none))"
-    return (
-        f'  (polyline (pts {xy}) {stroke} {fill} (uuid "{uuid.uuid4()}"))'
+    fill = (
+        "(fill (type outline))"
+        if shape.filled and shape.closed
+        else "(fill (type none))"
     )
+    return f'  (polyline (pts {xy}) {stroke} {fill} (uuid "{uuid.uuid4()}"))'
 
 
 #: KiCad renders embedded bitmaps at 300 DPI when scale is 1.0.
@@ -653,17 +668,19 @@ def net_label_sexprs(nets: list[dict[str, Any]], *, page_no: int) -> list[str]:
         # Closed copper (no dangling ends): one on-wire identity label,
         # nudged off junction points (a label ON a junction trips ERC's
         # label_multiple_wires).
-        longest = max(
-            segments, key=lambda s: (s[2] - s[0]) ** 2 + (s[3] - s[1]) ** 2
-        )
+        longest = max(segments, key=lambda s: (s[2] - s[0]) ** 2 + (s[3] - s[1]) ** 2)
         junction_keys = {
             key
             for key, points in _endpoint_buckets(segments).items()
             if len(points) >= 3
         }
         for fraction in (0.5, 0.25, 0.75):
-            mx_pt = float(longest[0]) + (float(longest[2]) - float(longest[0])) * fraction
-            my_pt = float(longest[1]) + (float(longest[3]) - float(longest[1])) * fraction
+            mx_pt = (
+                float(longest[0]) + (float(longest[2]) - float(longest[0])) * fraction
+            )
+            my_pt = (
+                float(longest[1]) + (float(longest[3]) - float(longest[1])) * fraction
+            )
             key = (
                 round(mx_pt / _JUNCTION_TOLERANCE_PT),
                 round(my_pt / _JUNCTION_TOLERANCE_PT),
@@ -694,9 +711,7 @@ def _dangling_endpoints(
 ) -> list[tuple[float, float]]:
     """Endpoints touched by exactly one segment (within one net), in pt."""
     return [
-        points[0]
-        for points in _endpoint_buckets(segments).values()
-        if len(points) == 1
+        points[0] for points in _endpoint_buckets(segments).values() if len(points) == 1
     ]
 
 
@@ -774,7 +789,6 @@ def component_annotation_sexprs(
     return items
 
 
-
 #: Vector exports with fewer polylines than this are considered empty (a
 #: scanned drawing's only "geometry" is the page frame) and get the raster
 #: page embedded so KiCad still opens the drawing as a tracing backdrop.
@@ -796,9 +810,7 @@ def raster_image_sexpr(
     center_x_mm = width_px / dpi * 25.4 / 2
     center_y_mm = height_px / dpi * 25.4 / 2
     b64 = base64.b64encode(png_bytes).decode("ascii")
-    chunks = "\n      ".join(
-        f'"{b64[i : i + 76]}"' for i in range(0, len(b64), 76)
-    )
+    chunks = "\n      ".join(f'"{b64[i : i + 76]}"' for i in range(0, len(b64), 76))
     return (
         f"  (image (at {_fmt(center_x_mm)} {_fmt(center_y_mm)}) "
         f"(scale {_fmt(scale)})\n"
@@ -828,7 +840,12 @@ def net_wires_sexpr(nets: list[Any], *, page_no: int) -> list[str]:
         for segment in net.get("segments") or []:
             if not (isinstance(segment, (list, tuple)) and len(segment) == 4):
                 continue
-            key = tuple(round(float(v), 2) for v in segment)
+            key = (
+                round(float(segment[0]), 2),
+                round(float(segment[1]), 2),
+                round(float(segment[2]), 2),
+                round(float(segment[3]), 2),
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -899,7 +916,9 @@ def embed_raster_page(
     kicad_text: str, png_bytes: bytes, *, dpi: float, width_px: int, height_px: int
 ) -> str:
     """Insert a page-render image into an existing ``.kicad_sch`` document."""
-    image = raster_image_sexpr(png_bytes, dpi=dpi, width_px=width_px, height_px=height_px)
+    image = raster_image_sexpr(
+        png_bytes, dpi=dpi, width_px=width_px, height_px=height_px
+    )
     return inject_items(kicad_text, [image])
 
 

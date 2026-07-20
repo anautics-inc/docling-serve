@@ -66,9 +66,13 @@ DIN_SYMBOL_MAP: tuple[tuple[str, str], ...] = (
     ("display", "A"),
 )
 
-_GROUND_NAME_RE = re.compile(r"^(GND|GROUND|VSS|CHASSIS|EARTH|COM|COMMON|0V|RETURN)$", re.IGNORECASE)
+_GROUND_NAME_RE = re.compile(
+    r"^(GND|GROUND|VSS|CHASSIS|EARTH|COM|COMMON|0V|RETURN)$", re.IGNORECASE
+)
 _MIL_GROUND_WIRE_RE = re.compile(r"^[A-Z0-9]+N$", re.IGNORECASE)
-_POWER_RE = re.compile(r"(\d+(?:\.\d+)?\s*V(?:DC)?\b)|^(VCC|VDD|VBUS|VBAT|PWR|POWER|\+\d)", re.IGNORECASE)
+_POWER_RE = re.compile(
+    r"(\d+(?:\.\d+)?\s*V(?:DC)?\b)|^(VCC|VDD|VBUS|VBAT|PWR|POWER|\+\d)", re.IGNORECASE
+)
 _HV_RE = re.compile(r"^(HV|HIGH[ _-]?VOLTAGE)([_\s-]|$)|[_\s-]HV$", re.IGNORECASE)
 # NOTE: "_" is a regex word character, so \b never fires around it — bus names
 # like CAN_BUS need explicit separator classes instead of word boundaries.
@@ -179,9 +183,7 @@ def net_connection_plan(
     return plan
 
 
-def cavity_ids_for(
-    component_id: str, nets: list[dict[str, Any]]
-) -> dict[int, str]:
+def cavity_ids_for(component_id: str, nets: list[dict[str, Any]]) -> dict[int, str]:
     """Stable cavity id per (net-order) membership of one component.
 
     The cavity IS the pin when the membership carries a designator;
@@ -257,9 +259,7 @@ def graph_to_eevision_csv(graph: dict[str, Any], *, source_name: str) -> str:
     nets = [n for n in graph.get("nets") or [] if isinstance(n, dict)]
 
     # Pre-compute per-component cavity assignments (pin-first).
-    cavities = {
-        comp_id: cavity_ids_for(comp_id, nets) for comp_id in components
-    }
+    cavities = {comp_id: cavity_ids_for(comp_id, nets) for comp_id in components}
     plan = net_connection_plan(nets, set(components), cavities)
     connected: set[str] = set()
     described: set[str] = set()
@@ -268,7 +268,9 @@ def graph_to_eevision_csv(graph: dict[str, Any], *, source_name: str) -> str:
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(_CSV_HEADERS)
 
-    def endpoint_columns(row: dict[str, str], side: str, comp_id: str, cavity: str) -> None:
+    def endpoint_columns(
+        row: dict[str, str], side: str, comp_id: str, cavity: str
+    ) -> None:
         row[f"{side}-Comp"] = safe_id(comp_id, comp_id)
         row[f"{side}-Conn"] = "A"
         row[f"{side}-Cav"] = cavity

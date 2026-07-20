@@ -59,7 +59,9 @@ _PROMPT = (
 )
 
 
-def _vision_rows(png_path: Path, *, base_url: str, api_key: str, model: str, timeout: float = 180.0):
+def _vision_rows(
+    png_path: Path, *, base_url: str, api_key: str, model: str, timeout: float = 180.0
+):
     """One page -> list of raw row dicts from the model. [] on any failure."""
     img_b64 = base64.b64encode(_downscale_png(png_path, max_dim=2000)).decode("ascii")
     body = {
@@ -88,7 +90,10 @@ def _vision_rows(png_path: Path, *, base_url: str, api_key: str, model: str, tim
         )
         resp.raise_for_status()
         content = str(
-            (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+            (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get(
+                "content"
+            )
+            or ""
         )
     except Exception as err:
         _log.info("vision parts page failed: %s", err)
@@ -167,7 +172,9 @@ def vision_parse_parts(
 
     if not (base_url and api_key and model) or not candidate_pages:
         return [], {"pagesRead": 0, "calls": 0}
-    pages = sorted({p for p in candidate_pages if p and p > 0})[: max_pages or len(candidate_pages)]
+    pages = sorted({p for p in candidate_pages if p and p > 0})[
+        : max_pages or len(candidate_pages)
+    ]
     tmp = work_dir or Path(tempfile.mkdtemp(prefix="vision-parts-"))
     tmp.mkdir(parents=True, exist_ok=True)
 
@@ -197,7 +204,9 @@ def vision_parse_parts(
             if fig:
                 current_figure = fig
             row["index"] = raw_index
-            entry = _to_entry(row, sequence=seq, page_number=page, figure=current_figure)
+            entry = _to_entry(
+                row, sequence=seq, page_number=page, figure=current_figure
+            )
             if entry is not None:
                 entries.append(entry)
                 seq += 1

@@ -1,0 +1,17 @@
+# Minimal LibreOffice headless runtime for legacy .doc/.ppt/.xls preconversion.
+# Built offline-capable: save with `docker save` and load on air-gapped hosts.
+FROM quay.io/centos/centos:stream9
+
+RUN dnf install -y dnf-plugins-core \
+    && dnf config-manager --enable crb \
+    && dnf install -y --best --nodocs --setopt=install_weak_deps=False \
+        libreoffice-core \
+        libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
+        util-linux \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf \
+    && test -x "$(readlink -f "$(command -v soffice)")" \
+    && prlimit --version \
+    && soffice --headless --version

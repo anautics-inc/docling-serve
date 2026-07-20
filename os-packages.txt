@@ -8,3 +8,8 @@ glib2
 libatomic
 openssl-fips-provider
 poppler-utils
+libreoffice-core
+libreoffice-calc
+libreoffice-impress
+libreoffice-writer
+util-linux

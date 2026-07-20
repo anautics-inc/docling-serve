@@ -65,6 +65,20 @@ class _FakeOrchestrator:
             num_failed=0,
         )
 
+    async def task_status(self, task_id: str):
+        return Task(
+            task_id=task_id,
+            task_type=TaskType.CONVERT,
+            sources=[],
+            target=S3Target(
+                endpoint="s3.example.com",
+                access_key="key",
+                secret_key="secret",
+                bucket="bucket",
+            ),
+            metadata={},
+        )
+
     async def on_result_fetched(self, task_id: str):
         del task_id
 
@@ -80,6 +94,9 @@ def fake_orchestrator(monkeypatch):
     monkeypatch.setattr(
         app_module.docling_serve_settings, "max_sources_per_request", 10
     )
+    monkeypatch.setattr(app_module.docling_serve_settings, "api_key", "")
+    monkeypatch.setattr(app_module.docling_serve_settings, "allow_no_auth", True)
+    monkeypatch.setattr(app_module.docling_serve_settings, "auth_mode", "none")
     monkeypatch.setattr(app_module, "get_async_orchestrator", lambda: orchestrator)
     return orchestrator
 

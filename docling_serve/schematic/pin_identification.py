@@ -51,7 +51,7 @@ _VISION_PROMPT = (
     "This crop shows ONE schematic component. {count} red numbered markers "
     "sit exactly where wires attach to the component symbol. For EACH marker, "
     "transcribe the pin number or pin name printed nearest to that marker, "
-    "at the symbol's edge (e.g. \"14\", \"VDD\", \"RA0\", \"Q7\"). Rules:\n"
+    'at the symbol\'s edge (e.g. "14", "VDD", "RA0", "Q7"). Rules:\n'
     "- TRANSCRIBE only what is printed; if no pin label is visible at a "
     "marker, use null.\n"
     "- Pin labels are the small tokens at the symbol boundary, not the "
@@ -206,7 +206,10 @@ def _nearest_pin_label(
 
 def _page_size_pt(graph: dict[str, Any], page_no: int) -> tuple[float, float] | None:
     for page in graph.get("pages") or []:
-        if isinstance(page, dict) and int(page.get("pageNumber") or page.get("page") or 0) == page_no:
+        if (
+            isinstance(page, dict)
+            and int(page.get("pageNumber") or page.get("page") or 0) == page_no
+        ):
             width = float(page.get("width") or 0)
             height = float(page.get("height") or 0)
             if width > 0 and height > 0:
@@ -275,7 +278,10 @@ def _apply_vision_pins(nodes: list[dict[str, Any]], response: Any) -> int:
         if not isinstance(entry, dict):
             continue
         try:
-            marker = int(entry.get("marker"))
+            marker_value = entry.get("marker")
+            if marker_value is None:
+                continue
+            marker = int(marker_value)
         except (TypeError, ValueError):
             continue
         token = str(entry.get("pin") or "").strip()

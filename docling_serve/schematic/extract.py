@@ -17,6 +17,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from docling_serve.artifacts.publish import publish_dir_to_s3
 from docling_serve.schematic.base import ExtractionContext
 from docling_serve.schematic.schematic_extractor import (
     SCHEMATIC_PROFILES,
@@ -98,25 +99,4 @@ def extract_schematic(
     }
 
 
-def publish_dir_to_s3(local_dir: Path, *, bucket: str, prefix: str) -> list[str]:
-    """Upload every file under ``local_dir`` to ``s3://{bucket}/{prefix}/`` (relative
-    paths preserved), typed at rest via :func:`content_type_for` so browsers and
-    nosniff proxies can serve the artifacts directly. Returns the uploaded object
-    keys. boto3 picks up the same credentials the rest of the service uses."""
-    import boto3
-
-    from docling_serve.storage import content_type_for
-
-    client = boto3.client("s3")
-    base = prefix.strip("/")
-    keys: list[str] = []
-    for path in sorted(local_dir.rglob("*")):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(local_dir).as_posix()
-        key = f"{base}/{rel}" if base else rel
-        client.upload_file(
-            str(path), bucket, key, ExtraArgs={"ContentType": content_type_for(path)}
-        )
-        keys.append(key)
-    return keys
+__all__ = ["extract_schematic", "is_schematic_candidate", "publish_dir_to_s3"]

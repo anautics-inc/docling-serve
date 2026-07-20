@@ -44,7 +44,14 @@ _UNIT_TO_MM = {"mm": 1.0, "cm": 10.0, "in": 25.4, "pt": 25.4 / 72.0}
 _MEASUREMENT_RE = re.compile(r"^(-?\d+(?:\.\d+)?)(mm|cm|in|pt)?$")
 
 #: Template packet structural elements we recurse through with layout offsets.
-_CONTAINER_TAGS = {"subform", "subformSet", "area", "exclGroup", "pageArea", "contentArea"}
+_CONTAINER_TAGS = {
+    "subform",
+    "subformSet",
+    "area",
+    "exclGroup",
+    "pageArea",
+    "contentArea",
+}
 
 
 class XfaToolsUnavailableError(RuntimeError):
@@ -106,7 +113,9 @@ def to_mm(value: str | None) -> float | None:
     match = _MEASUREMENT_RE.match(value.strip())
     if not match:
         return None
-    return round(float(match.group(1)) * _UNIT_TO_MM.get(match.group(2) or "mm", 1.0), 3)
+    return round(
+        float(match.group(1)) * _UNIT_TO_MM.get(match.group(2) or "mm", 1.0), 3
+    )
 
 
 def _local(tag: str) -> str:
@@ -312,15 +321,24 @@ def _units(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One unit per form section, elements = the section's fields/labels."""
     by_section: dict[str, list[dict[str, Any]]] = {}
     for record in fields:
-        by_section.setdefault(record["section"] or record["page"] or "form", []).append(record)
+        by_section.setdefault(record["section"] or record["page"] or "form", []).append(
+            record
+        )
 
     units: list[dict[str, Any]] = []
     for index, (section, records) in enumerate(by_section.items()):
         elements = []
         for element_index, record in enumerate(records):
-            text = record.get("boundValue") or record.get("value") or record.get("text") or ""
+            text = (
+                record.get("boundValue")
+                or record.get("value")
+                or record.get("text")
+                or ""
+            )
             caption = record.get("caption") or ""
-            plain = ": ".join(part for part in (caption or record["name"], text) if part)
+            plain = ": ".join(
+                part for part in (caption or record["name"], text) if part
+            )
             elements.append(
                 {
                     "elementId": f"unit-{index + 1:04d}-element-{element_index + 1:04d}",
@@ -370,7 +388,9 @@ def xfa_markdown(stem: str, fields: list[dict[str, Any]]) -> str:
             if record["kind"] == "field":
                 value = (record.get("boundValue") or record.get("value") or "").strip()
                 label = caption or record.get("name") or "field"
-                lines.append(f"- **{label}:** {value}" if value else f"- **{label}:** _(blank)_")
+                lines.append(
+                    f"- **{label}:** {value}" if value else f"- **{label}:** _(blank)_"
+                )
             else:
                 text = (record.get("text") or caption).strip()
                 if text:

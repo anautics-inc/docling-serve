@@ -37,9 +37,7 @@ def _load_labels() -> dict[str, dict]:
 def _extract_graph(pdf: Path, out_dir: Path) -> dict:
     from docling_serve.schematic.extract import extract_schematic
 
-    result = extract_schematic(
-        pdf, out_dir, profile="schematic", tenant_id="eval"
-    )
+    result = extract_schematic(pdf, out_dir, profile="schematic", tenant_id="eval")
     return result["graph"] or {}
 
 

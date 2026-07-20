@@ -146,7 +146,9 @@ def parse_rpstl(
                 sequence=seq,
                 page_number=page_number,
                 figure_number_raw=current_group,
-                figure_index_raw=row["item"] if _ITEM_RE.match(row["item"] or "") else "",
+                figure_index_raw=row["item"]
+                if _ITEM_RE.match(row["item"] or "")
+                else "",
                 part_number_raw=row["part"],
                 cage_raw=row["cage"],
                 description_raw=row["description"],

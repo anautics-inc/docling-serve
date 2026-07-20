@@ -39,16 +39,27 @@ spec:
         component: docling-serve-api
     spec:
       restartPolicy: Always
+      serviceAccountName: docling-serve-api
       containers:
         - name: api
           resources:
             limits:
               cpu: 1
               memory: 8Gi
+              ephemeral-storage: 2Gi
             requests:
               cpu: 250m
               memory: 1Gi
+              ephemeral-storage: 1Gi
           env:
+            - name: DOCLING_SERVE_UPLOAD_STAGING_MODE
+              value: required
+            - name: DOCLING_SERVE_UPLOAD_STAGING_BUCKET
+              value: DOCLING_STAGING_BUCKET_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_REGION
+              value: DOCLING_STAGING_REGION_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID
+              value: DOCLING_STAGING_KMS_KEY_PLACEHOLDER
             - name: DOCLING_SERVE_ENABLE_UI
               value: 'true'
             - name: DOCLING_SERVE_ENG_KIND
@@ -62,8 +73,9 @@ spec:
             - name: http
               containerPort: 5001
               protocol: TCP
-          imagePullPolicy: Always
-          image: 'ghcr.io/docling-project/docling-serve-cpu'
+          imagePullPolicy: IfNotPresent
+          # Render with scripts/render_deploy_example.py before applying.
+          image: 'DOCLING_SERVE_IMAGE_PLACEHOLDER'
 ---
 kind: Deployment
 apiVersion: apps/v1
@@ -85,16 +97,27 @@ spec:
         component: docling-serve-rq-worker
     spec:
       restartPolicy: Always
+      serviceAccountName: docling-serve-worker
       containers:
         - name: worker
           resources:
             limits:
               cpu: 1
               memory: 4Gi
+              ephemeral-storage: 2Gi
             requests:
               cpu: 250m
               memory: 1Gi
+              ephemeral-storage: 1Gi
           env:
+            - name: DOCLING_SERVE_UPLOAD_STAGING_MODE
+              value: required
+            - name: DOCLING_SERVE_UPLOAD_STAGING_BUCKET
+              value: DOCLING_STAGING_BUCKET_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_REGION
+              value: DOCLING_STAGING_REGION_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID
+              value: DOCLING_STAGING_KMS_KEY_PLACEHOLDER
             - name: DOCLING_SERVE_ENG_KIND
               value: 'rq'
             - name: DOCLING_SERVE_ENG_RQ_REDIS_URL
@@ -106,8 +129,9 @@ spec:
             - name: http
               containerPort: 5001
               protocol: TCP
-          imagePullPolicy: Always
-          image: 'ghcr.io/docling-project/docling-serve-cpu'
+          imagePullPolicy: IfNotPresent
+          # Render with the same immutable digest as the API deployment.
+          image: 'DOCLING_SERVE_IMAGE_PLACEHOLDER'
           command: ["docling-serve"]
           args: ["rq-worker"]
 ---
@@ -138,7 +162,7 @@ spec:
             requests:
               cpu: 250m
               memory: 100Mi
-          image: redis:latest
+          image: redis:7.4.9@sha256:a8f08480e1f88f2647fed492d1178c06abb0d0c1fbf02c682a61e2f483fb3954
           command: ["redis-server"]
           args:
             - "--port"

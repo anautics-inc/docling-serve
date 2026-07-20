@@ -258,11 +258,21 @@ def validate_target_kind(target_kind: str, policy: ServicePolicy) -> None:
     )
 
 
-def validate_convert_request(
-    request: ConvertSourcesRequest, policy: ServicePolicy
-) -> None:
-    validate_convert_options(request.options, policy)
-    validate_target_kind(request.target.kind, policy)
+def _validate_common_request_policy(
+    request: (
+        ConvertSourcesRequest | BatchConvertSourcesRequest | BaseChunkDocumentsRequest
+    ),
+    options: ConvertDocumentsOptions,
+    policy: ServicePolicy,
+    *,
+    validate_target: bool,
+    enforce_source_limit: bool,
+    presigned_supported: bool,
+) -> tuple[bool, bool]:
+    """Validate policy shared by conversion, batch, and chunk requests."""
+    validate_convert_options(options, policy)
+    if validate_target:
+        validate_target_kind(request.target.kind, policy)
 
     if request.callbacks and not policy.callbacks_enabled:
         raise HTTPException(
@@ -270,7 +280,7 @@ def validate_convert_request(
             detail="Callbacks are disabled by server policy.",
         )
 
-    if len(request.sources) > policy.max_sources_per_request:
+    if enforce_source_limit and len(request.sources) > policy.max_sources_per_request:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
@@ -280,6 +290,11 @@ def validate_convert_request(
         )
 
     if isinstance(request.target, PresignedUrlTarget):
+        if not presigned_supported:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="presigned_url target is not supported for chunk endpoints.",
+            )
         if not policy.artifact_storage_enabled:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -289,18 +304,18 @@ def validate_convert_request(
                 ),
             )
 
-    has_s3_source = any(
-        isinstance(source, S3SourceRequest) for source in request.sources
+    return (
+        any(isinstance(source, S3SourceRequest) for source in request.sources),
+        isinstance(request.target, S3Target),
     )
-    has_s3_target = isinstance(request.target, S3Target)
 
-    if has_s3_source:
-        if not has_s3_target:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail='source kind "s3" requires target kind "s3".',
-            )
 
+def _validate_paired_s3_request(has_s3_source: bool, has_s3_target: bool) -> None:
+    if has_s3_source and not has_s3_target:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail='source kind "s3" requires target kind "s3".',
+        )
     if has_s3_target and not has_s3_source:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -308,40 +323,31 @@ def validate_convert_request(
         )
 
 
+def validate_convert_request(
+    request: ConvertSourcesRequest, policy: ServicePolicy
+) -> None:
+    has_s3_source, has_s3_target = _validate_common_request_policy(
+        request,
+        request.options,
+        policy,
+        validate_target=True,
+        enforce_source_limit=True,
+        presigned_supported=True,
+    )
+    _validate_paired_s3_request(has_s3_source, has_s3_target)
+
+
 def validate_batch_convert_request(
     request: BatchConvertSourcesRequest, policy: ServicePolicy
 ) -> None:
-    validate_convert_options(request.options, policy)
-
-    if request.callbacks and not policy.callbacks_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Callbacks are disabled by server policy.",
-        )
-
-    if len(request.sources) > policy.max_sources_per_request:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"Too many sources: {len(request.sources)} exceeds the "
-                f"maximum of {policy.max_sources_per_request}."
-            ),
-        )
-
-    if isinstance(request.target, PresignedUrlTarget):
-        if not policy.artifact_storage_enabled:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=(
-                    "Presigned URL target requires artifact storage to be configured "
-                    "and enabled on the server."
-                ),
-            )
-
-    has_s3_source = any(
-        isinstance(source, S3SourceRequest) for source in request.sources
+    has_s3_source, has_s3_target = _validate_common_request_policy(
+        request,
+        request.options,
+        policy,
+        validate_target=False,
+        enforce_source_limit=True,
+        presigned_supported=True,
     )
-    has_s3_target = isinstance(request.target, S3Target)
 
     # Batch endpoint intentionally allows S3 sources on the Ray engine; only the
     # S3 source -> S3 target pairing is enforced here.
@@ -355,35 +361,12 @@ def validate_batch_convert_request(
 def validate_chunk_request(
     request: BaseChunkDocumentsRequest, policy: ServicePolicy
 ) -> None:
-    validate_convert_options(request.convert_options, policy)
-    validate_target_kind(request.target.kind, policy)
-
-    if request.callbacks and not policy.callbacks_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Callbacks are disabled by server policy.",
-        )
-
-    if isinstance(request.target, PresignedUrlTarget):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="presigned_url target is not supported for chunk endpoints.",
-        )
-
-    has_s3_source = any(
-        isinstance(source, S3SourceRequest) for source in request.sources
+    has_s3_source, has_s3_target = _validate_common_request_policy(
+        request,
+        request.convert_options,
+        policy,
+        validate_target=True,
+        enforce_source_limit=False,
+        presigned_supported=False,
     )
-    has_s3_target = isinstance(request.target, S3Target)
-
-    if has_s3_source:
-        if not has_s3_target:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail='source kind "s3" requires target kind "s3".',
-            )
-
-    if has_s3_target and not has_s3_source:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail='target kind "s3" requires source kind "s3".',
-        )
+    _validate_paired_s3_request(has_s3_source, has_s3_target)

@@ -19,6 +19,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from docling_serve.technical_order.contract import provenance
+from docling_serve.technical_order.mpl import FigureRecord, PartsListEntry
+
 #: Min tesseract confidence. Kept modest because the real noise filter is index-
 #: set membership (a token must BE one of the figure's parsed callouts) plus the
 #: glyph-size band — so we can accept fainter true callouts for better recall.
@@ -60,17 +63,32 @@ class FigureHotspot:
     # the callout's part. ``None`` until linked.
     part_sequence: int | None = None
     part_number: str = ""
+    detection_method: str = "tesseract-ocr"
 
     def center(self) -> tuple[float, float]:
         return ((self.x0 + self.x1) / 2.0, (self.y0 + self.y1) / 2.0)
 
     def as_dict(self) -> dict:
+        confidence = (
+            self.confidence / 100.0 if self.confidence > 1.0 else self.confidence
+        )
+        normalized_confidence = round(max(0.0, min(1.0, confidence)), 4)
         return {
             "index": self.index,
             "box": [self.x0, self.y0, self.x1, self.y1],
-            "confidence": round(self.confidence, 1),
+            "confidence": normalized_confidence,
             "partSequence": self.part_sequence,
             "partNumber": self.part_number,
+            "provenance": provenance(
+                method=self.detection_method,
+                parser="docling-serve.technical-order.figure-hotspots",
+                version="2",
+                confidence=normalized_confidence,
+                geometry={
+                    "coordinateSystem": "normalized-page-top-left",
+                    "boundingBox": [self.x0, self.y0, self.x1, self.y1],
+                },
+            ),
         }
 
 
@@ -97,21 +115,70 @@ def render_figure_png(
     try:
         subprocess.run(
             [
-                "pdftoppm", "-png", "-r", str(dpi),
-                "-f", str(page_number), "-l", str(page_number),
-                "-singlefile", str(pdf_path), str(out_stem),
+                "pdftoppm",
+                "-png",
+                "-r",
+                str(dpi),
+                "-f",
+                str(page_number),
+                "-l",
+                str(page_number),
+                "-singlefile",
+                str(pdf_path),
+                str(out_stem),
             ],
             capture_output=True,
             check=True,
             timeout=120,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
         return None
     png = out_stem.with_suffix(".png")
     return png if png.is_file() else None
 
 
-def _tesseract_tokens(png_path: Path, psm: int) -> list[tuple[str, float, int, int, int, int]]:
+def render_figure_svg(pdf_path: Path, page_number: int, out_stem: Path) -> Path | None:
+    """Vector "digital twin" of one page via ``pdftocairo -svg``.
+
+    For a born-digital drawing this reproduces the exact line art (the same
+    export the schematic extractor vectorizes), so viewers can zoom losslessly
+    and downstream 2D→3D stages get true geometry instead of raster pixels.
+    Returns the SVG path, or ``None`` if poppler is unavailable/fails.
+    """
+    out_stem.parent.mkdir(parents=True, exist_ok=True)
+    svg = out_stem.with_suffix(".svg")
+    try:
+        subprocess.run(
+            [
+                "pdftocairo",
+                "-svg",
+                "-f",
+                str(page_number),
+                "-l",
+                str(page_number),
+                str(pdf_path),
+                str(svg),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=120,
+        )
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
+        return None
+    return svg if svg.is_file() else None
+
+
+def _tesseract_tokens(
+    png_path: Path, psm: int
+) -> list[tuple[str, float, int, int, int, int]]:
     """Run tesseract once; return (text, conf, x, y, w, h) rows. Empty on failure.
 
     No char whitelist: the index-set membership check downstream is the real
@@ -124,7 +191,11 @@ def _tesseract_tokens(png_path: Path, psm: int) -> list[tuple[str, float, int, i
             check=True,
             timeout=120,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
         return []
     rows: list[tuple[str, float, int, int, int, int]] = []
     for line in out.stdout.decode("utf-8", errors="replace").splitlines()[1:]:
@@ -210,6 +281,55 @@ def _dedup(hotspots: list[FigureHotspot]) -> list[FigureHotspot]:
     return kept
 
 
+def crop_figure_to_hotspots(
+    png_path: Path,
+    hotspots: list[FigureHotspot],
+    *,
+    padding: float = 0.08,
+) -> bool:
+    """Crop a rendered sheet to its exploded-view figure and remap hotspots.
+
+    Callouts surround the illustrated assembly, so their collective extent is
+    a safer crop signal than page ink (headers, footers, and parts tables are
+    also ink). Sparse or clustered detections are left as a full page rather
+    than risking a destructive crop.
+    """
+    if len(hotspots) < 2:
+        return False
+    x0 = max(0.0, min(hotspot.x0 for hotspot in hotspots) - padding)
+    y0 = max(0.0, min(hotspot.y0 for hotspot in hotspots) - padding)
+    x1 = min(1.0, max(hotspot.x1 for hotspot in hotspots) + padding)
+    y1 = min(1.0, max(hotspot.y1 for hotspot in hotspots) + padding)
+    if x1 - x0 < 0.25 or y1 - y0 < 0.25:
+        return False
+    try:
+        from PIL import Image
+
+        with Image.open(png_path) as image:
+            width, height = image.size
+            left = max(0, int(x0 * width))
+            top = max(0, int(y0 * height))
+            right = min(width, int(x1 * width + 0.999))
+            bottom = min(height, int(y1 * height + 0.999))
+            if right <= left or bottom <= top:
+                return False
+            cropped = image.crop((left, top, right, bottom))
+            cropped.save(png_path, format="PNG")
+    except (OSError, ValueError):
+        return False
+
+    actual_x0 = left / width
+    actual_y0 = top / height
+    actual_width = (right - left) / width
+    actual_height = (bottom - top) / height
+    for hotspot in hotspots:
+        hotspot.x0 = round((hotspot.x0 - actual_x0) / actual_width, 4)
+        hotspot.x1 = round((hotspot.x1 - actual_x0) / actual_width, 4)
+        hotspot.y0 = round((hotspot.y0 - actual_y0) / actual_height, 4)
+        hotspot.y1 = round((hotspot.y1 - actual_y0) / actual_height, 4)
+    return True
+
+
 def link_hotspots_to_parts(
     hotspots: list[FigureHotspot], index_to_part: dict[str, tuple[int, str]]
 ) -> None:
@@ -248,11 +368,16 @@ def _downscale_png(png_path: Path, max_dim: int = 1568) -> bytes:
             w, h = im.size
             scale = min(1.0, max_dim / max(w, h))
             if scale < 1.0:
-                im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                resized = im.resize(
+                    (int(w * scale), int(h * scale)),
+                    Image.Resampling.LANCZOS,
+                )
+            else:
+                resized = im
             import io
 
             buf = io.BytesIO()
-            im.convert("L").save(buf, format="PNG")
+            resized.convert("L").save(buf, format="PNG")
             return buf.getvalue()
     except Exception:
         return png_path.read_bytes()
@@ -282,7 +407,9 @@ def vision_callouts(
     prompt = _VISION_PROMPT.format(indices=", ".join(sorted(target_indices)))
     body = {
         "model": model,
-        "max_tokens": 4096,
+        # Dense figures can carry 100+ callouts (~50 output tokens each), and
+        # adaptive-thinking aliases spend budget before emitting JSON.
+        "max_tokens": 8192,
         "temperature": 0,
         "messages": [
             {
@@ -297,26 +424,38 @@ def vision_callouts(
             }
         ],
     }
-    try:
-        resp = httpx.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            json=body,
-            headers={"authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        content = str(
-            (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
-        )
-    except Exception:
-        return []
 
-    match = re.search(r"\{.*\}", content, re.S)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group(0))
-    except ValueError:
+    def one_call() -> dict | None:
+        try:
+            resp = httpx.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=body,
+                headers={"authorization": f"Bearer {api_key}"},
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            content = str(
+                (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get(
+                    "content"
+                )
+                or ""
+            )
+        except Exception:
+            return None
+        match = re.search(r"\{.*\}", content, re.S)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except ValueError:
+            return None
+
+    # One retry: a transient refusal or truncated JSON otherwise silently
+    # costs every callout on the sheet.
+    data = one_call()
+    if not data or not data.get("callouts"):
+        data = one_call()
+    if not data:
         return []
 
     wanted = {t.strip().upper() for t in target_indices}
@@ -345,6 +484,7 @@ def vision_callouts(
                 x1=round(min(1.0, cx + half_w), 4),
                 y1=round(min(1.0, cy + half_h), 4),
                 confidence=50.0,  # model-sourced; below an OCR hit, above nothing
+                detection_method="vision-model",
             )
         )
     return out
@@ -354,10 +494,16 @@ def _fig_key(value: str) -> str:
     return (value or "").strip().upper()
 
 
+def _index_key(value: str) -> str:
+    """Callout key for a parts-list index: composite "index/sheet" values
+    ("1/1", "14/2") stamp only the index part on the drawing."""
+    return _fig_key(value).split("/")[0].strip()
+
+
 def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeline
     pdf_path: Path,
-    entries: list,
-    figures: list,
+    entries: list[PartsListEntry],
+    figures: list[FigureRecord],
     media_dir: Path,
     *,
     vision: dict | None = None,
@@ -379,23 +525,34 @@ def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeli
     media_dir.mkdir(parents=True, exist_ok=True)
 
     # Group parts by their figure number; index -> (sequence, partNumber).
+    # Composite "index/sheet" references additionally group per sheet, so a
+    # multi-sheet figure only looks for the callouts printed on that sheet.
     by_fig: dict[str, dict[str, tuple[int, str]]] = {}
-    entry_by_seq: dict[int, object] = {}
+    by_fig_sheet: dict[tuple[str, str], dict[str, tuple[int, str]]] = {}
+    entry_by_seq: dict[int, PartsListEntry] = {}
     for e in entries:
         if getattr(e, "row_type", "part") not in ("part", "kit", "end-item"):
             continue
-        fig = _fig_key(getattr(e, "figure_number_raw", ""))
-        idx = _fig_key(getattr(e, "figure_index_raw", ""))
-        if not fig or not idx:
+        entry_fig = _fig_key(getattr(e, "figure_number_raw", ""))
+        raw_idx = _fig_key(getattr(e, "figure_index_raw", ""))
+        idx = _index_key(raw_idx)
+        if not entry_fig or not idx:
             continue
-        by_fig.setdefault(fig, {}).setdefault(idx, (e.sequence, getattr(e, "part_number_raw", "")))
+        located = (e.sequence, getattr(e, "part_number_raw", ""))
+        by_fig.setdefault(entry_fig, {}).setdefault(idx, located)
+        if "/" in raw_idx:
+            sheet = raw_idx.split("/", 1)[1].strip()
+            if sheet:
+                by_fig_sheet.setdefault((entry_fig, sheet), {}).setdefault(idx, located)
         entry_by_seq[e.sequence] = e
 
     vision = vision or {}
     min_recall = float(vision.get("min_recall", 0.75))
     max_vision_calls = int(vision.get("max_calls", 0) or 0)  # 0 = uncapped
     vision_calls = 0
-    vision_ready = bool(vision.get("base_url") and vision.get("api_key") and vision.get("model"))
+    vision_ready = bool(
+        vision.get("base_url") and vision.get("api_key") and vision.get("model")
+    )
 
     # Figure-number reconciliation: some older TOs caption a figure "1-2" while
     # the parts list references it as "1". Allow a fallback from the caption's
@@ -414,29 +571,71 @@ def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeli
         "visionCalls": 0,
         "visionHotspots": 0,
         "linkedParts": 0,
+        "partsFigures": 0,
+        "figuresWithHotspots": 0,
+        "figuresMissingHotspots": 0,
+        "secondChanceCalls": 0,
     }
+    # Parts-joined figures that ended the primary pass empty get one
+    # second-chance vision call (fallback model — typically the stronger
+    # drawing-twin model) so a single flaky response can't leave a figure
+    # permanently unlinked.
+    second_chance: list[tuple[FigureRecord, Path, dict[str, tuple[int, str]]]] = []
+    # Coverage is FIGURE-level (a multi-sheet figure is covered when any sheet
+    # links) — continuation sheets legitimately carry no callouts.
+    parts_fig_keys: set[str] = set()
+    covered_fig_keys: set[str] = set()
+    # Figures whose parts list uses explicit "index/sheet" references: sheets
+    # absent from those references carry no callouts by declaration, so the
+    # callout pass (and its vision spend) is skipped for them.
+    figs_with_sheet_refs = {fig for (fig, _sheet) in by_fig_sheet}
     for fig in figures:
         if not fig.page_number:
             continue
         # Always capture the figure/drawing IMAGE — every illustration in the
         # document, not just parts figures (block diagrams, schematics, etc.).
-        stem_name = re.sub(r"[^A-Za-z0-9._-]", "_", f"figure-{fig.figure_number}-{fig.sheet_number or '1'}")
+        stem_name = re.sub(
+            r"[^A-Za-z0-9._-]",
+            "_",
+            f"figure-{fig.figure_number}-{fig.sheet_number or '1'}",
+        )
         png = render_figure_png(pdf_path, fig.page_number, media_dir / stem_name)
         if png is None:
             continue
         stats["rendered"] += 1
         fig.media_key = f"media/{png.name}"
+        svg = render_figure_svg(pdf_path, fig.page_number, media_dir / stem_name)
+        if svg is not None:
+            fig.vector_key = f"media/{svg.name}"
 
         # Callout hotspots only when the figure joins to parts (an IPB exploded
         # view). Non-parts diagrams are still captured as images above.
         fig_key = _fig_key(fig.figure_number)
-        index_to_part = by_fig.get(fig_key, {})
+        sheet_key = _fig_key(fig.sheet_number or "1")
+        index_to_part = by_fig_sheet.get((fig_key, sheet_key)) or by_fig.get(
+            fig_key, {}
+        )
+        if (
+            fig_key in figs_with_sheet_refs
+            and (fig_key, sheet_key) not in by_fig_sheet
+            and index_to_part
+        ):
+            # The parts list pins callouts to specific sheets and none point
+            # here — a declared no-callout continuation sheet.
+            parts_fig_keys.add(fig_key)
+            continue
         if not index_to_part:
             lead = fig_key.split("-")[0]
             if lead in by_fig and lead_counts.get(lead, 0) == 1:
                 index_to_part = by_fig[lead]
+        if not index_to_part and len(by_fig) == 1 and len(figures) == 1:
+            # One parts list, one illustration: they belong together even when
+            # the caption and list disagree on the figure number (seen on
+            # single-figure handbooks whose prose figure is numbered first).
+            index_to_part = next(iter(by_fig.values()))
         if not index_to_part:
             continue
+        parts_fig_keys.add(fig_key)
 
         all_indices = set(index_to_part.keys())
         hotspots = detect_figure_hotspots(png, all_indices)
@@ -446,7 +645,12 @@ def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeli
         # per-document vision-call budget is not yet exhausted.
         missing = {i for i in all_indices if i.upper() not in found}
         under_budget = max_vision_calls == 0 or vision_calls < max_vision_calls
-        if vision_ready and under_budget and missing and len(found) < min_recall * len(all_indices):
+        if (
+            vision_ready
+            and under_budget
+            and missing
+            and len(found) < min_recall * len(all_indices)
+        ):
             vision_calls += 1
             stats["visionCalls"] += 1
             vis = vision_callouts(
@@ -463,6 +667,10 @@ def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeli
                     stats["visionHotspots"] += 1
 
         link_hotspots_to_parts(hotspots, index_to_part)
+        if crop_figure_to_hotspots(png, hotspots):
+            # The vector export is still full-page; do not offer it as the
+            # extracted figure until its viewBox can be cropped equivalently.
+            fig.vector_key = ""
         fig.hotspots = [h.as_dict() for h in hotspots]
         stats["hotspots"] += len(hotspots)
         # Part -> callout: stamp the box + figure image back onto the entry.
@@ -472,4 +680,45 @@ def attach_hotspots(  # noqa: C901 - per-figure render+detect+link+vision pipeli
                 entry.callout_box = (hs.x0, hs.y0, hs.x1, hs.y1)
                 entry.figure_media_key = fig.media_key
                 stats["linkedParts"] += 1
+        if hotspots:
+            covered_fig_keys.add(fig_key)
+        else:
+            second_chance.append((fig, png, index_to_part))
+
+    fallback_model = vision.get("fallback_model") or vision.get("model")
+    for fig, png, index_to_part in second_chance:
+        if not (vision_ready and fallback_model):
+            break
+        fig_key = _fig_key(fig.figure_number)
+        if fig_key in covered_fig_keys:
+            # A sibling sheet already carries this figure's linked callouts —
+            # empty continuation sheets are normal, don't spend a retry.
+            continue
+        stats["secondChanceCalls"] += 1
+        stats["visionCalls"] += 1
+        vis = vision_callouts(
+            png,
+            set(index_to_part.keys()),
+            base_url=vision["base_url"],
+            api_key=vision["api_key"],
+            model=fallback_model,
+        )
+        link_hotspots_to_parts(vis, index_to_part)
+        if crop_figure_to_hotspots(png, vis):
+            fig.vector_key = ""
+        fig.hotspots = [h.as_dict() for h in vis]
+        stats["hotspots"] += len(vis)
+        stats["visionHotspots"] += len(vis)
+        for hs in vis:
+            if hs.part_sequence is not None and hs.part_sequence in entry_by_seq:
+                entry = entry_by_seq[hs.part_sequence]
+                entry.callout_box = (hs.x0, hs.y0, hs.x1, hs.y1)
+                entry.figure_media_key = fig.media_key
+                stats["linkedParts"] += 1
+        if vis:
+            covered_fig_keys.add(fig_key)
+
+    stats["partsFigures"] = len(parts_fig_keys)
+    stats["figuresWithHotspots"] = len(parts_fig_keys & covered_fig_keys)
+    stats["figuresMissingHotspots"] = len(parts_fig_keys - covered_fig_keys)
     return stats

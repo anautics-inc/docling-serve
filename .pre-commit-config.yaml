@@ -1,7 +1,7 @@
 fail_fast: true
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+    rev: v0.15.22
     hooks:
       # Run the Ruff formatter.
       - id: ruff-format
@@ -31,7 +31,7 @@ repos:
         # Fail the commit if documentation generation fails
         require_serial: true
   - repo: https://github.com/errata-ai/vale
-    rev: v3.12.0  # Use latest stable version
+    rev: v3.15.1
     hooks:
       - id: vale
         name: vale sync
@@ -39,6 +39,6 @@ repos:
         args: [sync, "--config=.github/vale.ini"]
   - repo: https://github.com/astral-sh/uv-pre-commit
     # uv version, https://github.com/astral-sh/uv-pre-commit/releases
-    rev: 0.8.19
+    rev: 0.11.29
     hooks:
       - id: uv-lock

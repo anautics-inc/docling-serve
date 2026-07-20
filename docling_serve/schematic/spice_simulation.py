@@ -68,8 +68,11 @@ _KIND_VOTES: dict[str, tuple[int, tuple[str, ...]]] = {
 }
 
 #: Net-name patterns that mark a DC supply, with how to read its voltage.
-_SUPPLY_RE = re.compile(r"(?:^|[^A-Z0-9])([+-]?(\d+(?:\.\d+)?)\s*V(?:DC|AC)?)(?:[^A-Z0-9]|$)", re.IGNORECASE)
+_SUPPLY_RE = re.compile(
+    r"(?:^|[^A-Z0-9])([+-]?(\d+(?:\.\d+)?)\s*V(?:DC|AC)?)(?:[^A-Z0-9]|$)", re.IGNORECASE
+)
 _SUPPLY_NAME_RE = re.compile(r"^(VCC|VDD|VBUS|VBAT|V\+|\+V|PWR|POWER)$", re.IGNORECASE)
+
 
 def _default_volts_by_kind() -> dict[str, float]:
     """Rail-voltage defaults by circuit kind, from the tuning config."""
@@ -129,9 +132,7 @@ def classify_schematic(graph: dict[str, Any]) -> SchematicClassification:
         rationale = "no recognizable component types"
     else:
         kind, count = votes.most_common(1)[0]
-        leaders = ", ".join(
-            f"{c} {t}" for t, c in histogram.most_common(4)
-        )
+        leaders = ", ".join(f"{c} {t}" for t, c in histogram.most_common(4))
         rationale = f"{count} components vote {kind} (dominant types: {leaders})"
 
     fidelity = {
@@ -289,9 +290,7 @@ def _net_lookup(graph: dict[str, Any]) -> dict[str, str]:
     return lookup
 
 
-def _most_connected_net(
-    graph: dict[str, Any], *, exclude: set[str]
-) -> str | None:
+def _most_connected_net(graph: dict[str, Any], *, exclude: set[str]) -> str | None:
     best: tuple[int, str] | None = None
     for net in graph.get("nets") or []:
         if not isinstance(net, dict):

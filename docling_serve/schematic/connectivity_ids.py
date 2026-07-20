@@ -165,8 +165,7 @@ def record_connectivity_quality(graph: dict[str, Any]) -> dict[str, Any]:
     for component in components.values():
         considered += 1
         has_identity = any(
-            str(component.get(field) or "").strip()
-            for field in ("value", "partNumber")
+            str(component.get(field) or "").strip() for field in ("value", "partNumber")
         )
         # An off-page terminal is self-evidencing: its printed text IS its
         # identity, so it counts as verified without a value/part number.
@@ -198,7 +197,6 @@ _TOKEN_ALIASES = {
     "rtn": "return",
     "exc": "excitation",
 }
-
 
 
 def _match_tokens(text: str) -> set[str]:
@@ -293,10 +291,7 @@ def drop_quantity_annotations(graph: dict[str, Any]) -> list[str]:
         if not isinstance(component, dict):
             continue
         ref = str(component.get("refDes") or "").strip()
-        if (
-            pattern.match(ref)
-            and not str(component.get("partNumber") or "").strip()
-        ):
+        if pattern.match(ref) and not str(component.get("partNumber") or "").strip():
             dropped_ids.add(str(component.get("id")))
             notes.append(f"dropped {ref} ({component.get('id')}): quantity annotation")
             continue
@@ -310,8 +305,7 @@ def drop_quantity_annotations(graph: dict[str, Any]) -> list[str]:
                 node
                 for node in net.get("nodes") or []
                 if not (
-                    isinstance(node, dict)
-                    and str(node.get("component")) in dropped_ids
+                    isinstance(node, dict) and str(node.get("component")) in dropped_ids
                 )
             ]
     return notes
@@ -431,7 +425,9 @@ def merge_duplicate_detections(graph: dict[str, Any]) -> list[str]:
         nodes = []
         for node in net.get("nodes") or []:
             if isinstance(node, dict) and node.get("component"):
-                comp_id = merged_into.get(str(node["component"]), str(node["component"]))
+                comp_id = merged_into.get(
+                    str(node["component"]), str(node["component"])
+                )
                 node["component"] = comp_id
                 key = f"{comp_id}:{node.get('pin')}:{node.get('attachment')}"
                 if key in seen:
@@ -453,8 +449,7 @@ def mark_ground_nets(graph: dict[str, Any]) -> int:
     ground_components = {
         str(c.get("id"))
         for c in graph.get("components") or []
-        if isinstance(c, dict)
-        and "ground" in str(c.get("type") or "").lower()
+        if isinstance(c, dict) and "ground" in str(c.get("type") or "").lower()
     }
     marked = 0
     for net in graph.get("nets") or []:
@@ -509,9 +504,7 @@ def reattach_floating_components(graph: dict[str, Any]) -> list[str]:
             continue
 
         evidence = " ".join(
-            str(v)
-            for v in (component.get("description"), component.get("refDes"))
-            if v
+            str(v) for v in (component.get("description"), component.get("refDes")) if v
         )
         attached_net = None
         source = None
@@ -526,7 +519,9 @@ def reattach_floating_components(graph: dict[str, Any]) -> list[str]:
                 # Prefer the most specific (longest) matching name; a tie
                 # between different nets is ambiguous — attach nothing.
                 candidates.sort(key=lambda item: -len(item[1]))
-                if len(candidates) == 1 or len(candidates[0][1]) > len(candidates[1][1]):
+                if len(candidates) == 1 or len(candidates[0][1]) > len(
+                    candidates[1][1]
+                ):
                     attached_net = candidates[0][0]
                     source = "description-inference"
             elif len(evidence_tokens) >= 2 and _is_connector(component):
@@ -537,9 +532,7 @@ def reattach_floating_components(graph: dict[str, Any]) -> list[str]:
                 # subset-of-net-name is safe where it would be a guess for
                 # any other component class.
                 containing = [
-                    net
-                    for net, tokens in named_nets
-                    if evidence_tokens <= tokens
+                    net for net, tokens in named_nets if evidence_tokens <= tokens
                 ]
                 if len(containing) == 1:
                     attached_net = containing[0]

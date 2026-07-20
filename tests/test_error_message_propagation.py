@@ -2,7 +2,7 @@
 
 import json
 
-from docling_serve.datamodel.responses import (
+from docling.datamodel.service.responses import (
     FailureCategory,
     FailurePhase,
     PublicFailureInfo,

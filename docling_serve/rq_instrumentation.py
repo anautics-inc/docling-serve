@@ -10,6 +10,11 @@ from opentelemetry.context import Context
 from opentelemetry.propagate import extract, inject
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from docling_serve.telemetry import (
+    record_sanitized_exception,
+    sanitize_telemetry_text,
+)
+
 logger = logging.getLogger(__name__)
 
 # Global tracer instance
@@ -107,11 +112,14 @@ def instrument_rq_job(func: Callable) -> Callable:
             try:
                 # Add job metadata as span attributes
                 if job:
-                    span.set_attribute("rq.job.id", job.id)
-                    span.set_attribute("rq.job.func_name", job.func_name)
-                    span.set_attribute("rq.queue.name", job.origin)
-                    if hasattr(job, "description"):
-                        span.set_attribute("rq.job.description", job.description)
+                    span.set_attribute(
+                        "rq.job.func_name",
+                        sanitize_telemetry_text(job.func_name),
+                    )
+                    span.set_attribute(
+                        "rq.queue.name",
+                        sanitize_telemetry_text(job.origin),
+                    )
 
                 # Execute the actual job function
                 result = func(*args, **kwargs)
@@ -121,9 +129,7 @@ def instrument_rq_job(func: Callable) -> Callable:
                 return result
 
             except Exception as e:
-                # Record exception and mark span as failed
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, str(e)))
+                record_sanitized_exception(span, e)
                 raise
 
     return wrapper

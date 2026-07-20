@@ -53,16 +53,25 @@ def graph_to_xml(graph: dict[str, Any], *, source_name: str) -> str:
             _net_element(nets_el, net)
 
     ET.indent(root, space="  ")
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
-        root, encoding="unicode"
-    ) + "\n"
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        + ET.tostring(root, encoding="unicode")
+        + "\n"
+    )
 
 
 def _component_element(parent: ET.Element, component: dict[str, Any]) -> None:
     comp_el = ET.SubElement(parent, "component")
     for name in (
-        "id", "refDes", "type", "value", "partNumber",
-        "location", "parentComponent", "page", "confidence",
+        "id",
+        "refDes",
+        "type",
+        "value",
+        "partNumber",
+        "location",
+        "parentComponent",
+        "page",
+        "confidence",
     ):
         _set_optional(comp_el, name, component.get(name))
     if component.get("description"):

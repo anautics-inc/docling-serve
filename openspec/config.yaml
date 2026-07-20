@@ -1,0 +1,36 @@
+schema: spec-driven
+
+context: |
+  Captify Docling Serve is the authoritative document conversion, chunking,
+  typed-domain extraction, and extraction-capability service. Package code is
+  in docling_serve/, tests are in tests/, and deployment artifacts are in
+  Containerfile, deploy/, docs/deploy-examples/, and scripts/.
+
+  Stack: Python 3.10+, FastAPI, Pydantic v2, docling-slim, docling-jobkit,
+  docling-graph, Redis/RQ or local orchestration, S3 artifact staging,
+  OpenTelemetry, pytest, ruff, and mypy.
+
+  Non-negotiables:
+  - Authenticated document work is tenant-scoped and fails closed.
+  - Runtime document and model downloads are forbidden in the offline/IL5 image.
+  - Existing HTTP and published bundle contracts remain compatible unless a
+    versioned migration and coordinated consumer change are specified.
+  - Every source, converter, OCR pass, and subprocess has bounded resources.
+  - Document routing and extraction policy have one service-owned source of truth.
+  - Supported-format changes require characterization and end-to-end contract tests.
+  - Container inputs and downloaded build sources are immutable and verifiable.
+
+rules:
+  proposal:
+    - Keep proposals concise and state non-goals.
+    - List every affected repository and public contract.
+    - A change with unresolved questions is not ready to apply.
+  design:
+    - Compare at least two viable approaches and record why the winner won.
+    - Keep a decision log and name all testing seams.
+    - Distinguish protocol constants from deployment or policy configuration.
+  tasks:
+    - Every task traces to a requirement.
+    - Use thin, end-to-end tracer bullets and record real ordering constraints.
+    - Include strict OpenSpec, ruff, mypy, pytest, client contract, and container verification.
+    - Cross-repository parity work must be an explicit task.

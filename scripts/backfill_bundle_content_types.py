@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from docling_serve.storage import content_type_for  # noqa: E402
+from docling_serve.storage import content_type_for
 
 GENERIC_TYPES = {"binary/octet-stream", "application/octet-stream", ""}
 DEFAULT_TYPE = "application/octet-stream"
@@ -50,7 +50,9 @@ def backfill(bucket: str, prefix: str, apply: bool) -> tuple[int, int, int]:
             if current not in GENERIC_TYPES:
                 skipped += 1  # already carries a real type — never overwrite
                 continue
-            print(f"{'RETYPE' if apply else 'DRY-RUN'} {key}: {current or '(none)'} -> {desired}")
+            print(
+                f"{'RETYPE' if apply else 'DRY-RUN'} {key}: {current or '(none)'} -> {desired}"
+            )
             if apply:
                 client.copy_object(
                     Bucket=bucket,
@@ -68,7 +70,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--prefix", required=True)
-    parser.add_argument("--apply", action="store_true", help="write changes (default: dry run)")
+    parser.add_argument(
+        "--apply", action="store_true", help="write changes (default: dry run)"
+    )
     args = parser.parse_args()
 
     scanned, retyped, skipped = backfill(args.bucket, args.prefix, args.apply)

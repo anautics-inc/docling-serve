@@ -8,7 +8,7 @@ emit extra, domain-specific sidecar artifacts into the bundle directory
 The dispatch seam is :func:`select_extractor`, which picks an extractor from
 the registry by ``(profile, file suffix, content)``. Adding a new format means
 writing one :class:`Extractor` and registering it — no edits to the assembly
-code in ``deep_document/export_results.py``.
+code in the native schematic bundle exporter.
 """
 
 from __future__ import annotations

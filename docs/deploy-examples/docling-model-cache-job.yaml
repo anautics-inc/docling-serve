@@ -10,7 +10,8 @@ spec:
     spec:
       containers:
         - name: loader
-          image: ghcr.io/docling-project/docling-serve-cpu:main
+          # Render with scripts/render_deploy_example.py before applying.
+          image: DOCLING_SERVE_IMAGE_PLACEHOLDER
           command:
             - docling-tools
             - models

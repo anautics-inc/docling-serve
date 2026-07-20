@@ -1,0 +1,73 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VerifyLifecycle",
+      "Effect": "Allow",
+      "Action": "s3:GetLifecycleConfiguration",
+      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER"
+    },
+    {
+      "Sid": "PutUploads",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
+    },
+    {
+      "Sid": "ProbeCanary",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/canary/*"
+    },
+    {
+      "Sid": "DeleteFailedUploads",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
+    },
+    {
+      "Sid": "ListCleanupQueue",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "docling-staging-cleanup/v1/queue/",
+            "docling-staging-cleanup/v1/queue/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "ReconcileEncryptedCleanupQueue",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/queue/*",
+        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/dead/*",
+        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/claims/*"
+      ]
+    },
+    {
+      "Sid": "EncryptStagedUploads",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Encrypt",
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "DOCLING_STAGING_KMS_KEY_PLACEHOLDER"
+    }
+  ]
+}

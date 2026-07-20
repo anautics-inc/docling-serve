@@ -55,7 +55,33 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_RESULT_REMOVAL_DELAY` | `300` | When `DOCLING_SERVE_SINGLE_USE_RESULTS` is active, this is the delay before results are removed from the task registry. |
 |  | `DOCLING_SERVE_MAX_DOCUMENT_TIMEOUT` | `604800` (7 days) | The maximum time for processing a document. |
 |  | `DOCLING_SERVE_MAX_NUM_PAGES` |  | The maximum number of pages for a document to be processed. |
-|  | `DOCLING_SERVE_MAX_FILE_SIZE` |  | The maximum file size for a document to be processed. |
+|  | `DOCLING_SERVE_MAX_FILE_SIZE` | `1073741824` | Finite global source/upload limit (1 GiB). Legacy Office admission also applies its lower format-specific limit. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_ENABLED` | `true` | Require worker-side `.doc`/`.xls`/`.ppt` preconversion. Readiness fails when enabled and LibreOffice is unavailable. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_EXECUTABLE` |  | Optional absolute system launcher path. Distro symlinks are resolved; the final target must be a regular executable under an approved system path. When unset, workers search `PATH`. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_TIMEOUT_SECONDS` | `120` | Hard timeout for each worker-side legacy Office preconversion. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_MAX_INPUT_BYTES` | `536870912` | Maximum legacy `.doc`/`.ppt`/`.xls` input size accepted by the preconverter (also capped by `DOCLING_SERVE_MAX_FILE_SIZE`). |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_MAX_OUTPUT_BYTES` | `536870912` | Maximum generated `.docx`/`.pptx`/`.xlsx` size accepted before Docling extraction (also capped by `DOCLING_SERVE_MAX_FILE_SIZE`). |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_MAX_SCRATCH_BYTES` | `1073741824` | Maximum total converter output/profile scratch growth; the worker terminates LibreOffice when exceeded. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_MAX_FILE_COUNT` | `256` | Maximum regular files LibreOffice may create in its isolated scratch directory. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_FETCH_TIMEOUT_SECONDS` | `30` | Per-request timeout for safely materializing a legacy Office URL. |
+|  | `DOCLING_SERVE_LEGACY_OFFICE_MAX_REDIRECTS` | `5` | Maximum redirects, with DNS/address policy revalidated at every hop. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_MODE` | `disabled` (source), `required` (production image) | `required` enables IAM-only multipart staging and gates startup/readiness on a lifecycle plus put/head/get/delete canary. `disabled` makes file-upload endpoints return 503 and is only for URL-only local/test deployments. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_BUCKET` | empty | Dedicated allowlisted staging bucket. No bucket supplied by task metadata is trusted. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_REGION` | empty | Required SDK region. Workers use their ambient IAM role; task payloads never contain credentials or presigned URLs. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_ENDPOINT` | empty (AWS regional endpoint) | Optional HTTPS S3-compatible endpoint. Required mode rejects non-HTTPS endpoints and disabled TLS verification. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_KEY_PREFIX` | `docling-staging/v1/` | Fixed allowlisted prefix. Required mode rejects any other value. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_RETENTION_DAYS` | `1` | Maximum accepted enabled lifecycle expiration for prefix `docling-staging/v1/` and tag `docling-staging=true`. `Expires` object metadata is not used as deletion proof. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_CLEANUP_RETENTION_DAYS` | `7` | Exact finite retention for pending encrypted cleanup queue records. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_DEAD_LETTER_RETENTION_DAYS` | `30` | Exact finite maximum retention for encrypted permanent-failure audit records. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_CLAIM_RETENTION_DAYS` | `1` | Lifecycle backstop for abandoned reconciliation claim objects. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_CLAIM_LEASE_SECONDS` | `60` | ETag-fenced distributed claim lease duration for competing reconcilers. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID` | empty | Preferred KMS key ARN. When empty, objects use and readiness verifies SSE-S3 (`AES256`). |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_MAX_FILE_SIZE` | `1073741824` | Independent hard upper bound for staged PUT/HEAD/streamed GET validation. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_IO_TIMEOUT_SECONDS` | `30` | SDK connect/read timeout for staging operations. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_PROBE_CACHE_SECONDS` | `30` | Short readiness capability-probe cache. Every RQ worker and Ray converter replica still forces a boot probe. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_CLEANUP_RETRIES` | `3` | Bounded idempotent delete retries; partial object errors are inspected and persisted as retry state. The verified lifecycle remains the pod-loss backstop. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_RECONCILE_INTERVAL_SECONDS` | `30` | Interval for the polling-independent encrypted cleanup-queue reconciler. |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_RECONCILE_BATCH_SIZE` | `32` | Maximum cleanup queue items processed per bounded reconciliation pass. |
 |  | `DOCLING_SERVE_ALLOWED_TARGET_TYPES` | `null` (all allowed) | List of allowed target kinds. Accepts JSON array or comma-separated string. Use this to block specific response targets such as `inbody`, `zip`, `presigned_url`, `s3`, or `put`. |
 |  | `DOCLING_SERVE_SYNC_POLL_INTERVAL` | `2` | Number of seconds to sleep between polling the task status in the sync endpoints. |
 |  | `DOCLING_SERVE_MAX_SYNC_WAIT` | `120` | Max number of seconds a synchronous endpoint is waiting for the task completion. |
@@ -69,7 +95,17 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_CORS_ORIGINS` | `["*"]` | A list of origins that should be permitted to make cross-origin requests. |
 |  | `DOCLING_SERVE_CORS_METHODS` | `["*"]` | A list of HTTP methods that should be allowed for cross-origin requests. |
 |  | `DOCLING_SERVE_CORS_HEADERS` | `["*"]` | A list of HTTP request headers that should be supported for cross-origin requests. |
-|  | `DOCLING_SERVE_API_KEY` | | If specified, all the API requests must contain the header `X-Api-Key` with this value. |
+|  | `DOCLING_SERVE_AUTH_MODE` | `api_key` | Deployment-wide authentication mode: `assertion` for Captify production, `api_key` for generic upstream clients, or explicit local-only `none`. Modes never fall back per request. |
+|  | `DOCLING_SERVE_API_KEY` | | Used only in `api_key` mode. It cannot authorize a request in `assertion` mode. |
+|  | `DOCLING_SERVE_ALLOW_NO_AUTH` | `false` | In `api_key` mode, an empty key fails closed unless this local-dev compatibility option is explicitly enabled. |
+|  | `DOCLING_SERVE_ASSERTION_ISSUER` | `captify-pytology` | Exact JWT issuer required in `assertion` mode. |
+|  | `DOCLING_SERVE_ASSERTION_AUDIENCE` | `docling-service` | Exact JWT audience required in `assertion` mode. |
+|  | `DOCLING_SERVE_ASSERTION_CLIENT_ID` | `captify-platform` | Exact signed machine client id. |
+|  | `DOCLING_SERVE_ASSERTION_ALGORITHM` | `RS256` | Asymmetric JWT algorithm. HMAC/shared-secret algorithms are rejected. |
+|  | `DOCLING_SERVE_ASSERTION_KMS_KEY_ID` | empty | KMS asymmetric signing-key id whose public key verifies assertions. |
+|  | `DOCLING_SERVE_ASSERTION_KMS_REGION` | empty | AWS region for the KMS public-key lookup. |
+|  | `DOCLING_SERVE_ASSERTION_PUBLIC_KEY` | empty | PEM public-key alternative when no KMS key id is configured. |
+|  | `DOCLING_SERVE_ASSERTION_REDIS_URL` | empty | Required shared Redis for atomic `SET NX EX` replay rejection; missing/unavailable storage fails closed. |
 |  | `DOCLING_SERVE_ENG_KIND` | `local` | The compute engine to use for the async tasks. Possible values are `local`, `rq` and `ray`. See below for more configurations of the engines. |
 
 ### Configuration File Support

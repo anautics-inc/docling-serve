@@ -45,7 +45,11 @@ def test_reattach_by_refdes_alias_tokens():
     # "SIG GND" net matches component text via the sig->signal, gnd->ground aliases.
     graph = {
         "components": [
-            {"id": "C6", "type": "Capacitor", "description": "Filter capacitor on signal ground"},
+            {
+                "id": "C6",
+                "type": "Capacitor",
+                "description": "Filter capacitor on signal ground",
+            },
         ],
         "nets": [
             {"id": "N1", "name": "SIG GND", "nodes": [{"component": "X1"}]},
@@ -88,7 +92,11 @@ def test_reattach_by_segment_terminus():
 def test_reattach_skips_ambiguous_evidence():
     graph = {
         "components": [
-            {"id": "C8", "type": "capacitor", "description": "Filter capacitor on B+ and B-"},
+            {
+                "id": "C8",
+                "type": "capacitor",
+                "description": "Filter capacitor on B+ and B-",
+            },
         ],
         "nets": [
             {"id": "N1", "name": "B+", "nodes": []},
@@ -104,12 +112,18 @@ def test_connector_named_after_wire_attaches_by_subset():
             {"id": "C34", "type": "connector", "refDes": "SYNCHRO EXC"},
         ],
         "nets": [
-            {"id": "N1", "name": "26 VAC TO SYNCHRO EXC", "nodes": [{"component": "R3"}]},
+            {
+                "id": "N1",
+                "name": "26 VAC TO SYNCHRO EXC",
+                "nodes": [{"component": "R3"}],
+            },
             {"id": "N2", "name": "26 VAC", "nodes": [{"component": "R3"}]},
         ],
     }
     notes = reattach_floating_components(graph)
-    assert notes == ["reattached SYNCHRO EXC -> 26 VAC TO SYNCHRO EXC (description-inference)"]
+    assert notes == [
+        "reattached SYNCHRO EXC -> 26 VAC TO SYNCHRO EXC (description-inference)"
+    ]
 
 
 def test_connector_subset_rule_requires_unique_match():
@@ -157,13 +171,15 @@ def test_glyph_check_removes_confident_phantom_capacitor():
             }
         ],
     }
+
     # A fake understand() that returns a confident "not a capacitor" verdict,
     # and a fake page image so a crop is attempted.
     def fake_understand(prompt, system, png):
         return {"kind": "other", "confidence": 0.95, "reason": "just a wire with bars"}
 
-    from PIL import Image
     import io
+
+    from PIL import Image
 
     buf = io.BytesIO()
     Image.new("RGB", (612, 792), "white").save(buf, format="PNG")
@@ -233,7 +249,12 @@ def test_connectivity_named_single_ended_is_off_page_pass():
         "schemaVersion": "captify.schematic.v1",
         "components": [{"id": "R1", "bbox": [0, 0, 1, 1]}],
         "nets": [
-            {"id": "N1", "name": "B+", "nodes": [{"component": "R1"}], "segments": [[0, 0, 1, 1]]},
+            {
+                "id": "N1",
+                "name": "B+",
+                "nodes": [{"component": "R1"}],
+                "segments": [[0, 0, 1, 1]],
+            },
         ],
     }
     checks = {c.id: c for c in check_graph_integrity(graph)}
@@ -246,7 +267,12 @@ def test_connectivity_unnamed_single_ended_warns():
         "schemaVersion": "captify.schematic.v1",
         "components": [{"id": "R1", "bbox": [0, 0, 1, 1]}],
         "nets": [
-            {"id": "N1", "name": None, "nodes": [{"component": "R1"}], "segments": [[0, 0, 1, 1]]},
+            {
+                "id": "N1",
+                "name": None,
+                "nodes": [{"component": "R1"}],
+                "segments": [[0, 0, 1, 1]],
+            },
         ],
     }
     checks = {c.id: c for c in check_graph_integrity(graph)}

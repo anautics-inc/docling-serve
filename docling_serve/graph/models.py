@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 class GraphExtractRequest(BaseModel):
     """Request body for ``POST /v1/graph/extract``."""
 
-    text: str = Field(description="Converted document text/markdown to extract a graph from")
+    text: str = Field(
+        description="Converted document text/markdown to extract a graph from"
+    )
     template: str | None = Field(
         default=None,
         description="Dotted import path to a docling-graph Pydantic template; "

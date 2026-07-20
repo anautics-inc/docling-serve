@@ -50,20 +50,21 @@ def _build_ray_orchestrator(
     )
 
     with (
+        patch.object(
+            factory_module,
+            "build_converter_manager",
+            side_effect=lambda config: _FakeConverterManager(config),
+        ),
         patch(
             "docling_jobkit.convert.manager.DoclingConverterManagerConfig",
             _CapturedConverterManagerConfig,
-        ),
-        patch(
-            "docling_jobkit.convert.manager.DoclingConverterManager",
-            _FakeConverterManager,
         ),
         patch(
             "docling_jobkit.orchestrators.ray.config.RayOrchestratorConfig",
             _CapturedConfig,
         ),
         patch(
-            "docling_jobkit.orchestrators.ray.orchestrator.RayOrchestrator",
+            "docling_serve.ray_legacy.DoclingServeRayOrchestrator",
             _FakeRayOrchestrator,
         ),
     ):
@@ -98,6 +99,7 @@ def test_ray_config_never_receives_none_slice_parallelism(monkeypatch):
     )
 
     assert orchestrator.config.max_page_slice_parallelism is not None
+    assert "worker_process_setup_hook" not in orchestrator.config.ray_runtime_env
 
 
 def test_ray_config_omits_presigned_storage_when_disabled(monkeypatch):
@@ -168,20 +170,21 @@ def test_ray_config_passes_presigned_storage_when_enabled(monkeypatch):
     )
 
     with (
+        patch.object(
+            factory_module,
+            "build_converter_manager",
+            side_effect=lambda config: _FakeConverterManager(config),
+        ),
         patch(
             "docling_jobkit.convert.manager.DoclingConverterManagerConfig",
             _CapturedConverterManagerConfig,
-        ),
-        patch(
-            "docling_jobkit.convert.manager.DoclingConverterManager",
-            _FakeConverterManager,
         ),
         patch(
             "docling_jobkit.orchestrators.ray.config.RayOrchestratorConfig",
             _CapturedConfig,
         ),
         patch(
-            "docling_jobkit.orchestrators.ray.orchestrator.RayOrchestrator",
+            "docling_serve.ray_legacy.DoclingServeRayOrchestrator",
             _FakeRayOrchestrator,
         ),
     ):

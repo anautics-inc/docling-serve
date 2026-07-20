@@ -63,9 +63,11 @@ def graph_to_kbl(graph: dict[str, Any], *, source_name: str) -> str:
     _text(unit, "Si_unit_name", "metre")
 
     ET.indent(root, space="  ")
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
-        root, encoding="unicode"
-    ) + "\n"
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        + ET.tostring(root, encoding="unicode")
+        + "\n"
+    )
 
 
 def _cavity_counts(
@@ -140,9 +142,7 @@ def _cavity_labels(component: dict[str, Any], count: int) -> list[str]:
     return labels
 
 
-def _library_wires(
-    root: ET.Element, nets: list[dict[str, Any]]
-) -> dict[str, str]:
+def _library_wires(root: ET.Element, nets: list[dict[str, Any]]) -> dict[str, str]:
     """``General_wire`` library parts, one per net."""
     wire_part_id_by_net: dict[str, str] = {}
     for index, net in enumerate(nets, start=1):
@@ -171,7 +171,8 @@ def _harness_header(
 ) -> ET.Element:
     harness = ET.SubElement(root, "Harness")
     harness.set("id", "harness_1")
-    title = graph.get("titleBlock") if isinstance(graph.get("titleBlock"), dict) else {}
+    raw_title = graph.get("titleBlock")
+    title: dict[str, Any] = raw_title if isinstance(raw_title, dict) else {}
     _part_fields(
         harness,
         part_number=title.get("drawingNumber") or _slug(source_name),
@@ -293,7 +294,9 @@ def _wires_and_connections(
         for extremity_index, contact_id in enumerate(extremity_contacts, start=1):
             extremity = ET.SubElement(connection, "Extremities")
             extremity.set("id", f"conn_{index}_ext{extremity_index}")
-            _text(extremity, "Position_on_wire", "0.0" if extremity_index == 1 else "1.0")
+            _text(
+                extremity, "Position_on_wire", "0.0" if extremity_index == 1 else "1.0"
+            )
             _text(extremity, "Contact_point", contact_id)
     return wire_elements, connection_elements
 

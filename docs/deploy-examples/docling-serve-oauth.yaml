@@ -79,16 +79,18 @@ spec:
         component: docling-serve-api
     spec:
       restartPolicy: Always
-      serviceAccountName: docling-serve
+      serviceAccountName: docling-serve-api
       containers:
         - name: api
           resources:
             limits:
               cpu: 2000m
               memory: 4Gi
+              ephemeral-storage: 2Gi
             requests:
               cpu: 800m
               memory: 1Gi
+              ephemeral-storage: 1Gi
           startupProbe:
             httpGet:
               path: /livez
@@ -118,6 +120,14 @@ spec:
             successThreshold: 1
             failureThreshold: 5
           env:
+            - name: DOCLING_SERVE_UPLOAD_STAGING_MODE
+              value: required
+            - name: DOCLING_SERVE_UPLOAD_STAGING_BUCKET
+              value: DOCLING_STAGING_BUCKET_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_REGION
+              value: DOCLING_STAGING_REGION_PLACEHOLDER
+            - name: DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID
+              value: DOCLING_STAGING_KMS_KEY_PLACEHOLDER
             - name: NAMESPACE
               valueFrom:
                 fieldRef:
@@ -137,8 +147,9 @@ spec:
           volumeMounts:
             - name: proxy-tls
               mountPath: /etc/tls/private
-          imagePullPolicy: Always
-          image: 'ghcr.io/docling-project/docling-serve-cpu:fix-ui-with-https'
+          imagePullPolicy: IfNotPresent
+          # Render with scripts/render_deploy_example.py before applying.
+          image: 'DOCLING_SERVE_IMAGE_PLACEHOLDER'
         - name: oauth-proxy
           resources:
             limits:

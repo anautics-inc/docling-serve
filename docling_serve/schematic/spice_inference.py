@@ -110,8 +110,14 @@ _RULES: tuple[tuple[tuple[str, ...], InferredBody], ...] = (
         _contact("10m", "switch"),
     ),
     (("fuse", "jumper", "shunt", "link"), _contact("1m", "fuse/link")),
-    (("lamp", "light", "indicator", "bulb", "annunciator"), _resistive("28", "lamp filament")),
-    (("heater", "thermistor", "resistor element"), _resistive("100", "heating element")),
+    (
+        ("lamp", "light", "indicator", "bulb", "annunciator"),
+        _resistive("28", "lamp filament"),
+    ),
+    (
+        ("heater", "thermistor", "resistor element"),
+        _resistive("100", "heating element"),
+    ),
     (("led",), _LED),
     (("zener", "diode", "rectifier"), _DIODE),
     (("crystal", "resonator", "oscillator element"), _CRYSTAL),
@@ -123,9 +129,7 @@ _RULES: tuple[tuple[tuple[str, ...], InferredBody], ...] = (
 _VALUE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*(k|meg|m|u|n|p|f|g)?", re.IGNORECASE)
 
 
-def infer_subckt_body(
-    component: dict[str, Any], pin_count: int
-) -> InferredBody | None:
+def infer_subckt_body(component: dict[str, Any], pin_count: int) -> InferredBody | None:
     """First-order physics for one component, or ``None`` (keep the stub).
 
     Matching uses the component ``type`` transcribed from the drawing.
@@ -155,9 +159,7 @@ def model_cards_for(bodies: list[InferredBody]) -> list[str]:
     return needed
 
 
-def _apply_printed_value(
-    component: dict[str, Any], body: InferredBody
-) -> InferredBody:
+def _apply_printed_value(component: dict[str, Any], body: InferredBody) -> InferredBody:
     """Honour a printed component value for single-resistance bodies."""
     if len(body.lines) != 1 or not body.lines[0].startswith("R1 "):
         return body

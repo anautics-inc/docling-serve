@@ -87,7 +87,10 @@ def test_confidence_gate_flags_low_evidence():
     # Two components, neither with identity nor attachment -> 0% verified.
     graph = {
         "confidence": 0.9,
-        "components": [{"id": "A", "type": "capacitor"}, {"id": "B", "type": "capacitor"}],
+        "components": [
+            {"id": "A", "type": "capacitor"},
+            {"id": "B", "type": "capacitor"},
+        ],
         "nets": [],
     }
     quality = record_connectivity_quality(graph)

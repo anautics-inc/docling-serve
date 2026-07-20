@@ -2,11 +2,16 @@
 
 services:
   docling-serve:
-    image: ghcr.io/docling-project/docling-serve-rocm72:main
+    # Set to an immutable digest built from this repository's Containerfile.
+    image: ${DOCLING_SERVE_IMAGE:?Set DOCLING_SERVE_IMAGE to registry/repo@sha256:digest}
     container_name: docling-serve
     ports:
       - "5001:5001"
     environment:
+      DOCLING_SERVE_UPLOAD_STAGING_MODE: "required"
+      DOCLING_SERVE_UPLOAD_STAGING_BUCKET: "${DOCLING_SERVE_UPLOAD_STAGING_BUCKET:?required}"
+      DOCLING_SERVE_UPLOAD_STAGING_REGION: "${AWS_REGION:?required}"
+      DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID: "${DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID:?required}"
       DOCLING_SERVE_ENABLE_UI: "true"
       ROCR_VISIBLE_DEVICES: "0" # https://rocm.docs.amd.com/en/latest/conceptual/gpu-isolation.html#rocr-visible-devices
       ## This section is for compatibility with older cards

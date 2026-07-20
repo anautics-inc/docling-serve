@@ -73,9 +73,23 @@ _CROP_PAD_FRAC = 0.25
 
 #: Component types that matter most for the digital twin (verified first).
 _SIGNIFICANT_TYPES = (
-    "ic", "connector", "relay", "regulator", "op-amp", "opamp", "mcu",
-    "microcontroller", "transistor", "valve", "ecu", "switch", "crystal",
-    "fuse", "diode", "display", "tube",
+    "ic",
+    "connector",
+    "relay",
+    "regulator",
+    "op-amp",
+    "opamp",
+    "mcu",
+    "microcontroller",
+    "transistor",
+    "valve",
+    "ecu",
+    "switch",
+    "crystal",
+    "fuse",
+    "diode",
+    "display",
+    "tube",
 )
 
 
@@ -211,9 +225,7 @@ def _apply_crop_adoptions(
         old_ref = _text(component.get("refDes"))
         if old_ref:
             alias[old_ref.upper()] = ref_raw
-        _log.info(
-            "label-verify crop adoption: %r -> %r (%r)", old_ref, ref_raw, part
-        )
+        _log.info("label-verify crop adoption: %r -> %r (%r)", old_ref, ref_raw, part)
         component["refDes"] = ref_raw
         component["partNumber"] = part
         component["refDesVerified"] = True
@@ -329,7 +341,9 @@ def _apply_part_overrides(
             continue
         _log.info(
             "label-verify part override on %r: %r -> %r",
-            component.get("refDes"), component.get("partNumber"), part,
+            component.get("refDes"),
+            component.get("partNumber"),
+            part,
         )
         component["partNumber"] = part
         component["partNumberVerified"] = True

@@ -188,9 +188,7 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
                 lines.append(f"{name} {' '.join(nodes)} {wrapper_name}")
                 continue
 
-        prefix = next(
-            (p for token, p in _PRIMITIVES if token in ctype), None
-        )
+        prefix = next((p for token, p in _PRIMITIVES if token in ctype), None)
         if prefix and pin_count == 2:
             name = _unique(f"{prefix}{ref}", element_names, prefix)
             value, assumed = _component_value(component, prefix)
@@ -203,16 +201,16 @@ def graph_to_spice(graph: dict[str, Any], *, source_name: str) -> str:
 
         # Inferred tier: first-order physics from the component type when no
         # vendor model exists (relay coil, switch contact, lamp filament, …).
-        body = infer_subckt_body(component, pin_count)
-        if body is not None:
+        inferred_body = infer_subckt_body(component, pin_count)
+        if inferred_body is not None:
             base = f"INF_{_subckt_name(component, comp_id)[3:]}_{pin_count}P"
             # Same name but different internals (two lamps with different
             # printed values) must not share a definition.
             subckt, suffix = base, 2
-            while subckt in inferred and inferred[subckt][1] != body:
+            while subckt in inferred and inferred[subckt][1] != inferred_body:
                 subckt = f"{base}_{suffix}"
                 suffix += 1
-            inferred[subckt] = (pin_count, body)
+            inferred[subckt] = (pin_count, inferred_body)
             name = _unique(f"X{ref}", element_names, "X")
             lines.append(f"{name} {' '.join(nodes)} {subckt}")
             continue

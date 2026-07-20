@@ -6,21 +6,60 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import msgpack
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 from rq import get_current_job
 
 from docling_jobkit.convert.manager import DoclingConverterManager
+from docling_jobkit.datamodel.result import DoclingTaskResult
 from docling_jobkit.datamodel.task import Task
-from docling_jobkit.orchestrators.rq.orchestrator import RQOrchestratorConfig
+from docling_jobkit.datamodel.task_meta import TaskStatus
+from docling_jobkit.orchestrators.rq.orchestrator import (
+    RQOrchestratorConfig,
+    _TaskUpdate,
+)
 from docling_jobkit.orchestrators.rq.worker import _run_docling_task
+from docling_jobkit.orchestrators.serialization import make_msgpack_safe
 
+from docling_serve.execution.failure_mapping import TaskFailureMapping
+from docling_serve.execution.staged_docling_task import run_staged_task
+from docling_serve.ingestion.canonical_task import (
+    finalize_canonical_task,
+    prepare_canonical_task,
+)
 from docling_serve.rq_instrumentation import extract_trace_context
+from docling_serve.telemetry import (
+    record_sanitized_exception,
+    sanitize_telemetry_text,
+)
+from docling_serve.upload_staging import (
+    persist_cleanup_state,
+    redact_sensitive_text,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def instrumented_docling_task(
+def _publish_owned_failure(
+    job: Any,
+    orchestrator_config: RQOrchestratorConfig,
+    task_id: str,
+    failure: TaskFailureMapping,
+) -> None:
+    if not failure.service_owned:
+        return
+    job.connection.publish(
+        orchestrator_config.sub_channel,
+        _TaskUpdate(
+            task_id=task_id,
+            task_status=TaskStatus.FAILURE,
+            error_message=failure.public_message,
+        ).model_dump_json(),
+    )
+
+
+def instrumented_docling_task(  # noqa: C901
     task_data: dict,
     conversion_manager: DoclingConverterManager,
     orchestrator_config: RQOrchestratorConfig,
@@ -54,13 +93,13 @@ def instrumented_docling_task(
     ) as span:
         try:
             # Add job attributes
-            span.set_attribute("rq.job.id", job.id)
             if job.func_name:
-                span.set_attribute("rq.job.func_name", job.func_name)
-            span.set_attribute("rq.queue.name", job.origin)
+                span.set_attribute(
+                    "rq.job.func_name", sanitize_telemetry_text(job.func_name)
+                )
+            span.set_attribute("rq.queue.name", sanitize_telemetry_text(job.origin))
 
             # Add task attributes
-            span.set_attribute("docling.task.id", task_id)
             span.set_attribute("docling.task.type", str(task.task_type.value))
             span.set_attribute("docling.task.num_sources", len(task.sources))
 
@@ -95,7 +134,12 @@ def instrumented_docling_task(
                 info: dict[str, str],
                 raw_bytes: Any = None,
             ) -> None:
-                event_info = dict(info)
+                event_info = {
+                    sanitize_telemetry_text(key, limit=64): sanitize_telemetry_text(
+                        value
+                    )
+                    for key, value in info.items()
+                }
                 if info["type"] == "FileSource" and raw_bytes is not None:
                     file_hash = hashlib.md5(
                         raw_bytes, usedforsecurity=False
@@ -122,7 +166,9 @@ def instrumented_docling_task(
                 phase_state["has_headers"] = has_headers
                 trace.get_current_span().set_attribute("num_sources", num_sources)
                 source_names = ", ".join(
-                    f"{s['type']}={s.get('name') or s.get('filename') or s.get('url', 'unknown')}"
+                    redact_sensitive_text(
+                        f"{s['type']}={s.get('name') or s.get('filename') or s.get('url', 'unknown')}"
+                    )
                     for s in source_info
                 )
                 logger.info(
@@ -132,7 +178,7 @@ def instrumented_docling_task(
             def on_result_stored(result_key: str, result_size_bytes: int) -> None:
                 store_span = trace.get_current_span()
                 store_span.set_attribute("result_size_bytes", result_size_bytes)
-                store_span.set_attribute("result_key", result_key)
+                store_span.set_attribute("result_stored", True)
 
             def on_failure(
                 _task: Task,
@@ -142,24 +188,86 @@ def instrumented_docling_task(
                 source_context = "N/A"
                 if source_info:
                     source_context = ", ".join(
-                        f"{s['type']}={s.get('name') or s.get('filename') or s.get('url', 'unknown')}"
+                        redact_sensitive_text(
+                            f"{s['type']}={s.get('name') or s.get('filename') or s.get('url', 'unknown')}"
+                        )
                         for s in source_info
                     )
                 logger.error(
-                    f"Docling task {task_id} failed: {exc}. Sources: {source_context}",
-                    exc_info=True,
+                    "Docling task %s failed: %s. Sources: %s",
+                    task_id,
+                    redact_sensitive_text(str(exc)),
+                    source_context,
                 )
 
-            result_key = _run_docling_task(
+            def run_task(worker_task: Task) -> Any:
+                with prepare_canonical_task(worker_task) as canonical:
+                    execution_task = (
+                        canonical.task if canonical is not None else worker_task
+                    )
+                    result_key = _run_docling_task(
+                        execution_task,
+                        conversion_manager,
+                        orchestrator_config,
+                        scratch_dir,
+                        phase_cm=phase_cm,
+                        on_source_prepared=on_source_prepared,
+                        on_sources_prepared=on_sources_prepared,
+                        on_result_stored=on_result_stored,
+                        on_failure=on_failure,
+                    )
+                    if canonical is None:
+                        return result_key
+                    packed = job.connection.get(result_key)
+                    if not isinstance(packed, bytes):
+                        raise RuntimeError("Canonical task result was not stored.")
+                    task_result = DoclingTaskResult.model_validate(
+                        msgpack.unpackb(packed, raw=False)
+                    )
+                    canonical_result = finalize_canonical_task(canonical, task_result)
+                    job.connection.setex(
+                        result_key,
+                        orchestrator_config.results_ttl,
+                        msgpack.packb(
+                            make_msgpack_safe(canonical_result.model_dump()),
+                            use_bin_type=True,
+                        ),
+                    )
+                    return result_key
+
+            def map_failure(
+                _exc: Exception,
+                failure: TaskFailureMapping,
+            ) -> None:
+                _publish_owned_failure(
+                    job,
+                    orchestrator_config,
+                    task_id,
+                    failure,
+                )
+
+            def persist_cleanup(states: list[Any]) -> None:
+                if states:
+                    persist_cleanup_state(
+                        job.connection,
+                        task_id=task_id,
+                        states=states,
+                        ttl_seconds=orchestrator_config.results_ttl,
+                    )
+
+            def report_cleanup_failure(_exc: Exception) -> None:
+                logger.error(
+                    "Staged input cleanup requires lifecycle reconciliation "
+                    "for task %s",
+                    task_id,
+                )
+
+            result_key = run_staged_task(
                 task,
-                conversion_manager,
-                orchestrator_config,
-                scratch_dir,
-                phase_cm=phase_cm,
-                on_source_prepared=on_source_prepared,
-                on_sources_prepared=on_sources_prepared,
-                on_result_stored=on_result_stored,
-                on_failure=on_failure,
+                run_task,
+                on_failure=map_failure,
+                on_cleanup=persist_cleanup,
+                on_cleanup_failure=report_cleanup_failure,
             )
 
             # Mark span as successful
@@ -169,6 +277,5 @@ def instrumented_docling_task(
             return result_key
 
         except Exception as e:
-            span.record_exception(e)
-            span.set_status(Status(StatusCode.ERROR, str(e)))
+            record_sanitized_exception(span, e)
             raise

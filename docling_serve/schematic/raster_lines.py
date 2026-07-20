@@ -130,18 +130,14 @@ def raster_wire_polylines(
             continue
         if _is_page_frame(simplified, width_px, height_px):
             continue
-        polylines.append(
-            [(x / scale_x, y / scale_y) for x, y in simplified]
-        )
+        polylines.append([(x / scale_x, y / scale_y) for x, y in simplified])
     return polylines
 
 
 # ── Ink mask ────────────────────────────────────────────────────────────────
 
 
-def _wire_ink_mask(
-    cv2: Any, np: Any, color: Any, text_boxes_px: list[Box]
-) -> Any:
+def _wire_ink_mask(cv2: Any, np: Any, color: Any, text_boxes_px: list[Box]) -> Any:
     """Binary wire ink: no colored annotation, no text, no large fills."""
     gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
     binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
@@ -170,9 +166,7 @@ def _wire_ink_mask(
 _OFFSETS = ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1))
 
 
-def _skeleton_chains(
-    cv2: Any, np: Any, skeleton: Any, distance: Any
-) -> list[list[Pt]]:
+def _skeleton_chains(cv2: Any, np: Any, skeleton: Any, distance: Any) -> list[list[Pt]]:
     """Centerline chains from the skeleton, with crossings resolved.
 
     Chains run node-to-node (junctions and endpoints). Dangling spurs are
@@ -342,7 +336,9 @@ def _pair_opposing_arms(
     return pairs
 
 
-def _arm_point(chains: list[dict[str, Any]], arm: tuple[int, bool], *, at_node: bool) -> Pt:
+def _arm_point(
+    chains: list[dict[str, Any]], arm: tuple[int, bool], *, at_node: bool
+) -> Pt:
     points = chains[arm[0]]["points"]
     return points[0] if arm[1] == at_node else points[-1]
 
@@ -369,7 +365,7 @@ def _bridge_chain_gaps(
     chains: list[list[Pt]], text_boxes_px: list[Box]
 ) -> list[list[Pt]]:
     """Join near-collinear chain ends across dashes, dots, and label holes."""
-    paths = [list(c) for c in chains]
+    paths: list[list[Pt] | None] = [list(c) for c in chains]
     changed = True
     while changed:
         changed = False
@@ -379,13 +375,16 @@ def _bridge_chain_gaps(
             for j in range(i + 1, len(paths)):
                 if paths[j] is None:
                     continue
-                joined = _try_join(paths[i], paths[j], text_boxes_px)
+                path_i = paths[i]
+                path_j = paths[j]
+                assert path_i is not None and path_j is not None
+                joined = _try_join(path_i, path_j, text_boxes_px)
                 if joined is not None:
                     paths[i] = joined
                     paths[j] = None
                     changed = True
         paths = [p for p in paths if p is not None]
-    return paths
+    return [path for path in paths if path is not None]
 
 
 def _try_join(

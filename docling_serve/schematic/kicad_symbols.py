@@ -105,8 +105,7 @@ def ensure_kicad_cli_config() -> None:
     if not template.exists():
         return
     config_home = Path(
-        os.environ.get("KICAD_CONFIG_HOME")
-        or Path.home() / ".config" / "kicad"
+        os.environ.get("KICAD_CONFIG_HOME") or Path.home() / ".config" / "kicad"
     )
     try:
         version_dirs = [p for p in config_home.glob("*.*") if p.is_dir()]
@@ -129,7 +128,9 @@ class SymbolLibrary:
         self._dir = symbol_dir
         self._cache: dict[str, tuple[str, list[tuple[str, float, float, float]]]] = {}
 
-    def load(self, lib: str, name: str) -> tuple[str, list[tuple[str, float, float, float]]] | None:
+    def load(
+        self, lib: str, name: str
+    ) -> tuple[str, list[tuple[str, float, float, float]]] | None:
         """Symbol definition (renamed ``Lib:Name``) + pins (number, x, y, angle)."""
         lib_id = f"{lib}:{name}"
         if lib_id in self._cache:
@@ -295,18 +296,18 @@ def build_symbol_instances(
         # Memberships the tracer produced WITHOUT a geometric attachment
         # (model-sourced or description-inferred): the graph still knows the
         # net, so an unclaimed pin ties to it by a label ON the pin.
-        unplaced_nets = list(
-            unattached.get(str(component.get("id") or ""), [])
-        )
+        unplaced_nets = list(unattached.get(str(component.get("id") or ""), []))
         for _number, pin_x, pin_y, _angle in pins:
             world_x = center_x + pin_x
             world_y = center_y - pin_y
             if not remaining:
                 if unplaced_nets:
                     net = unplaced_nets.pop(0)
-                    name = net_display_name(net)
-                    if name:
-                        items.append(_global_label_sexpr(name, world_x, world_y))
+                    unplaced_name = net_display_name(net)
+                    if unplaced_name:
+                        items.append(
+                            _global_label_sexpr(unplaced_name, world_x, world_y)
+                        )
                         continue
                 # No traced wire reaches this pin — declare it intentionally
                 # open with a no-connect marker, the schematic-standard way to
@@ -333,11 +334,13 @@ def build_symbol_instances(
             # electrically BY NAME, so a stub whose attachment misses the
             # traced copper by a hair still lands on the right net (and ERC
             # sees a terminated, named endpoint instead of a dangle).
-            name = net_display_name(net)
-            if name and (name, att_x, att_y) not in labeled_points:
-                labeled_points.add((name, att_x, att_y))
+            attached_name = net_display_name(net)
+            if attached_name and (attached_name, att_x, att_y) not in labeled_points:
+                labeled_points.add((attached_name, att_x, att_y))
                 items.append(
-                    _global_label_sexpr(name, att_x * PT_TO_MM, att_y * PT_TO_MM)
+                    _global_label_sexpr(
+                        attached_name, att_x * PT_TO_MM, att_y * PT_TO_MM
+                    )
                 )
     return lib_defs, items, mapped
 
@@ -372,7 +375,11 @@ def _attachments_by_component(
                 continue
             attachment = node.get("attachment")
             comp_id = str(node.get("component") or "")
-            if comp_id and isinstance(attachment, (list, tuple)) and len(attachment) == 2:
+            if (
+                comp_id
+                and isinstance(attachment, (list, tuple))
+                and len(attachment) == 2
+            ):
                 out.setdefault(comp_id, []).append(
                     (float(attachment[0]), float(attachment[1]), net)
                 )
@@ -532,16 +539,18 @@ def simulation_stimulus_items(
             _instance_sexpr(
                 "Simulation_SPICE:VDC",
                 reference=f"VSIM{placed}",
-                value=str(supply.get("volts") if supply.get("volts") is not None else default_volts),
+                value=str(
+                    supply.get("volts")
+                    if supply.get("volts") is not None
+                    else default_volts
+                ),
                 x=x,
                 y=row_y,
                 pins=vdc_pins,
                 sheet_uuid=sheet_uuid,
             )
         )
-        items.append(
-            _global_label_sexpr(name, x + plus[1], row_y - plus[2])
-        )
+        items.append(_global_label_sexpr(name, x + plus[1], row_y - plus[2]))
         items.append(
             _instance_sexpr(
                 "power:GND",

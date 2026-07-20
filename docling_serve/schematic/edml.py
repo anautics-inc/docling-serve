@@ -35,7 +35,9 @@ from docling_serve.schematic.eevision import (
 
 def _q(value: Any) -> str:
     text = "" if value is None else str(value)
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    return (
+        '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    )
 
 
 def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
@@ -52,9 +54,7 @@ def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
     # Root attributes (shown on EEvision's file-select page via Index).
     title = (graph.get("pages") or [{}])[0].get("titleBlock") or {}
     generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%SZ")
-    lines.append(
-        "Attributes Index = " + _q("Source\tTitle\tGenerated") + ","
-    )
+    lines.append("Attributes Index = " + _q("Source\tTitle\tGenerated") + ",")
     lines.append(f"    {_q('Source')} = {_q(source_name)},")
     lines.append(f"    {_q('Title')} = {_q(title.get('title') or source_name)},")
     lines.append(f"    {_q('Generated')} = {_q(generated)};")
@@ -71,9 +71,9 @@ def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
         if classified:
             properties.append(f"Type = {classified}")
         if net.get("gauge"):
-            properties.append(f'{_q("Gauge")} = {_q(net["gauge"])}')
+            properties.append(f"{_q('Gauge')} = {_q(net['gauge'])}")
         if net.get("wireIdSource") == "assigned":
-            properties.append(f'{_q("Wire Id Source")} = {_q("assigned")}')
+            properties.append(f"{_q('Wire Id Source')} = {_q('assigned')}")
         lines.append(f"Wire {ref} | " + ", ".join(properties) + ";")
     lines.append("")
 
@@ -89,9 +89,13 @@ def graph_to_edml(graph: dict[str, Any], *, source_name: str) -> str:
         if not net_ref:
             continue
         for comp_id, cavity in entry["endpoints"]:
-            joins_by_component.setdefault(comp_id, []).append(f"A.{cavity} -> {net_ref}")
+            joins_by_component.setdefault(comp_id, []).append(
+                f"A.{cavity} -> {net_ref}"
+            )
         for comp_id, first_cavity, extra_cavity in entry["arcs"]:
-            arcs_by_component.setdefault(comp_id, []).append((first_cavity, extra_cavity))
+            arcs_by_component.setdefault(comp_id, []).append(
+                (first_cavity, extra_cavity)
+            )
 
     lines.append("// Components")
     seen_ids: set[str] = set()

@@ -53,7 +53,7 @@ variables:
 
 .uv_bootstrap:
   before_script:
-    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - curl -LsSf https://astral.sh/uv/0.11.29/install.sh | sh
     - export PATH="$HOME/.local/bin:$PATH"
 
 # ─── BUILDX FIPS BYPASS ───────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ lint:
   tags:
     - al2023-fips-shell
   rules:
-    - when: never
+    - when: always
 
 build-wheel:
   extends: .uv_bootstrap
@@ -131,6 +131,12 @@ build-image:
         -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         --load \
         .
+      docker run --rm -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        soffice --headless --version
+      docker run --rm -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        python /opt/app-root/src/scripts/smoke_legacy_office_runtime.py
       docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
       echo "Image pushed to GitLab container registry."
     - |
@@ -200,7 +206,7 @@ unit-tests:
   tags:
     - al2023-fips-shell
   rules:
-    - when: never
+    - when: always
 
 # Override the GitLab dependency-scanning template job to enforce it always runs.
 # Note: dependency_scanning (underscore) is a configuration-only stub — the real
@@ -264,8 +270,9 @@ merge-sbom:
       artifacts: true
   script:
     - DOCLING_SERVE_VERSION=$(cat docling_serve_version.txt)
-    - echo "Downloading CycloneDX CLI v0.29.1..."
-    - curl -fsSL -o ./cyclonedx https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.29.1/cyclonedx-linux-x64
+    - echo "Downloading CycloneDX CLI v0.32.0..."
+    - curl -fsSL -o ./cyclonedx https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.32.0/cyclonedx-linux-x64
+    - echo "454879e6a4a405c8a13bff49b8982adcb0596f3019b26b0811c66e4d7f0783e1  ./cyclonedx" | sha256sum -c -
     - chmod +x ./cyclonedx
     # AL2023 FIPS runners lack libicu; run .NET in invariant globalization mode
     - export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1

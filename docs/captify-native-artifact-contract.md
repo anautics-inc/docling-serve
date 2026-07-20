@@ -1,23 +1,21 @@
-# Captify ↔ docling-serve 1.24 native artifact contract (Option A)
+# Captify ↔ Docling Serve native artifact contract
 
-Proven end-to-end on **docling-serve 1.24.0** (docling-slim 2.102.2, docling-jobkit
-1.23.1) in the `cap-af-jmj-docling124` worktree. This replaces the fork's custom
-`deep_document` S3 bundle (`document.json`/`extraction.json`/`media/`) with
-docling's **native pre-signed artifact storage**. Consumers (captify-pytology,
-captify-core-workbench) adapt to the shape below.
+Generic conversion uses Docling's native pre-signed artifact storage. Captify
+typed extractors publish their versioned form, BOM, and schematic bundles
+separately; clients must select the contract by the reported capability/domain.
 
 ## Server configuration (env)
 
 ```env
 DOCLING_SERVE_ARTIFACT_STORAGE_ENABLED=true
-# NOTE: scheme-less host — jobkit prepends "https://". "https://s3..." => "https://https:/..." (broken).
+# Use the endpoint format required by the installed docling-jobkit release.
 DOCLING_SERVE_ARTIFACT_STORAGE_ENDPOINT=s3.us-east-1.amazonaws.com
 DOCLING_SERVE_ARTIFACT_STORAGE_BUCKET=captify-core
 DOCLING_SERVE_ARTIFACT_STORAGE_KEY_PREFIX=tenants/
 DOCLING_SERVE_ARTIFACT_STORAGE_PRESIGN_TTL_SECONDS=3600
-# NOTE: jobkit's S3 client uses THESE keys, not the boto3 default chain / instance role.
-DOCLING_SERVE_ARTIFACT_STORAGE_ACCESS_KEY=...
-DOCLING_SERVE_ARTIFACT_STORAGE_SECRET_KEY=...
+# Prefer workload identity / IAM roles. Static keys are development-only.
+# DOCLING_SERVE_ARTIFACT_STORAGE_ACCESS_KEY=...
+# DOCLING_SERVE_ARTIFACT_STORAGE_SECRET_KEY=...
 DOCLING_SERVE_ARTIFACT_STORAGE_VERIFY_SSL=true
 ```
 
@@ -66,21 +64,20 @@ POST /v1/convert/file/async
 
 `artifact_type ∈ {json, html, markdown, text, doctags, resource_bundle}`.
 
-## Mapping from the old captify bundle
+## Native artifact mapping
 
-| Old fork bundle | Native artifact |
+| Content | Native artifact |
 |---|---|
-| `document.json` | `artifact_type=json` (lossless DoclingDocument) |
-| `document.md` | `artifact_type=markdown` |
-| `document.html` | `artifact_type=html` |
-| `media/*` | `artifact_type=resource_bundle` |
-| `extraction.json` (manifest) | the `documents[]` item itself (status + artifact list) |
+| Lossless DoclingDocument | `artifact_type=json` |
+| Markdown | `artifact_type=markdown` |
+| HTML | `artifact_type=html` |
+| Images and related resources | `artifact_type=resource_bundle` |
+| Status and artifact list | the `documents[]` item |
 
-## Consumer adaptation (Option A)
+## Consumer contract
 
-- **captify-pytology** `DoclingServeClient`: replace `submit_deep_convert_job`
-  (`extraction=deep` + custom bundle) with the native async convert above; read
-  `documents[].artifacts[]` and hand the pre-signed URLs (or proxy them) downstream.
-- **captify-core-workbench** notebook bundle reader: fetch artifacts by
-  `artifact_type` from the pre-signed URIs instead of reading
-  `document.json`/`extraction.json`/`media/` from a fixed prefix.
+- Generic clients read `documents[].artifacts[]` by `artifact_type`.
+- Typed clients read the versioned bundle reported by `/v1/capabilities` and
+  the extraction response's `domain`.
+- Clients must not infer a typed contract from a filename or duplicate
+  Docling Serve's content-routing heuristics.

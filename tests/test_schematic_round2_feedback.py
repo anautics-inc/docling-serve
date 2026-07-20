@@ -30,7 +30,11 @@ def test_page_scale_box_is_excluded_from_clipping():
 
 def test_traced_segments_attach_to_model_nets_on_fallback():
     model_graph_nets = [
-        {"id": "N1", "name": "26 VAC", "nodes": [{"component": "C0001"}, {"component": "C0002"}]},
+        {
+            "id": "N1",
+            "name": "26 VAC",
+            "nodes": [{"component": "C0001"}, {"component": "C0002"}],
+        },
         {"id": "N2", "name": "GND", "nodes": [{"component": "C0003"}]},
     ]
     traced = [
@@ -184,14 +188,14 @@ def test_pin_claims_require_exact_attachment_count():
     output_side, winding_side = nets[0], nets[1]
 
     winding_pins = sorted(
-        n["pin"] for n in winding_side["nodes"] if n["component"] == "C0001" and n["pin"]
+        n["pin"]
+        for n in winding_side["nodes"]
+        if n["component"] == "C0001" and n["pin"]
     )
     assert winding_pins == ["14", "15", "3"]
 
     # The single output-side attachment must NOT inherit one of the winding
     # pins (the reviewed pin-15 misassignment): counts don't line up and the
     # pins are already consumed by the better-matched winding net.
-    output_pins = [
-        n["pin"] for n in output_side["nodes"] if n["component"] == "C0001"
-    ]
+    output_pins = [n["pin"] for n in output_side["nodes"] if n["component"] == "C0001"]
     assert output_pins == [None]

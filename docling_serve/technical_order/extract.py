@@ -3,7 +3,7 @@
 A genuine docling gap: the master parts list (MPL) is a column-aligned table
 whose meaning lives in its print layout, which docling's reading-order export
 does not preserve. So this parses the PDF with poppler's ``pdftotext -layout``
-and the deterministic MPL parser, producing the ``captify.bom.v1`` payload. The
+and the deterministic MPL parser, producing the ``captify.bom.v2`` payload. The
 *base* document (markdown/json/chunks) is still docling's native job — this runs
 as an additional, domain-specific pass.
 """
@@ -18,11 +18,7 @@ from typing import Any
 from docling_serve.technical_order.bundle import BOM_SCHEMA_ID, build_bom_payload
 from docling_serve.technical_order.metadata import parse_to_metadata
 from docling_serve.technical_order.mpl import parse_parts_lists
-from docling_serve.technical_order.pdftext import (
-    ocr_available,
-    ocr_page_texts,
-    page_layout_texts,
-)
+from docling_serve.technical_order.pdftext import ocr_page_texts, page_layout_texts
 from docling_serve.technical_order.rowbox import attach_row_boxes
 from docling_serve.technical_order.triage import triage_pdf
 
@@ -38,7 +34,10 @@ _PARTS_HEADER_RE = re.compile(
 
 def _parts_header_pages(pages: list[str]) -> list[int]:
     """1-based page numbers whose text carries a parts-list table header."""
-    return [i + 1 for i, text in enumerate(pages) if text and _PARTS_HEADER_RE.search(text)]
+    return [
+        i + 1 for i, text in enumerate(pages) if text and _PARTS_HEADER_RE.search(text)
+    ]
+
 
 TO_PROFILES = {
     "technical-order",
@@ -50,10 +49,6 @@ TO_PROFILES = {
 }
 _TO_DOCUMENT_TYPES = {"TO-IPB", "TO-RPSTL"}
 _MPL_FAMILIES = {"mpl-modern", "mpl-legacy"}
-# Max page count for the full-document OCR fallback. Above this, tesseract over
-# every page costs minutes for documents that are almost always large RPSTL/TM
-# formats the column parser can't read regardless of text source.
-_OCR_PAGE_BUDGET = 180
 
 
 def looks_like_technical_order(pdf_path: Path) -> bool:
@@ -62,7 +57,10 @@ def looks_like_technical_order(pdf_path: Path) -> bool:
         triage = triage_pdf(pdf_path)
     except Exception:
         return False
-    return triage.document_type in _TO_DOCUMENT_TYPES or triage.format_family in _MPL_FAMILIES
+    return (
+        triage.document_type in _TO_DOCUMENT_TYPES
+        or triage.format_family in _MPL_FAMILIES
+    )
 
 
 def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; clearer inline
@@ -72,7 +70,7 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
     media_dir: Path | None = None,
     vision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Parse an IPB/RPSTL technical-order PDF into the ``captify.bom.v1`` payload.
+    """Parse an IPB/RPSTL technical-order PDF into the ``captify.bom.v2`` payload.
 
     When ``media_dir`` is given, each figure sheet is rendered to a PNG there and
     its index callouts are detected + linked to the parts list both ways (callout
@@ -99,7 +97,9 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
     # RPSTL fallback: the AF-MPL grammar doesn't read the Army/joint RPSTL column
     # layout (ITEM | SMR | FSCM | PART NUMBER | DESCRIPTION | QTY). When the MPL
     # pass finds nothing on an RPSTL-classified doc, parse the RPSTL grid instead.
-    if not entries and (triage.document_type == "TO-RPSTL" or triage.format_family == "rpstl"):
+    if not entries and (
+        triage.document_type == "TO-RPSTL" or triage.format_family == "rpstl"
+    ):
         from docling_serve.technical_order.rpstl import parse_rpstl
 
         rpstl_entries, rpstl_figures = parse_rpstl(pages)
@@ -109,21 +109,14 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
 
     # OCR fallback: a scanned / dirty-legacy-OCR TO whose text layer yielded no
     # parts list gets a fresh tesseract pass (this genuinely recovers rows on
-    # older IPBs whose embedded OCR layer the column parser can't align). Two
-    # guards keep it from burning minutes for no gain:
-    #   * born-digital docs are skipped — their text is clean, so a 0-row parse
-    #     means the *format* is unsupported (e.g. an Army TM RPSTL work package),
-    #     which re-OCR won't fix.
-    #   * documents above the page budget are skipped — full-document tesseract
-    #     on a 200-350pp manual costs minutes, and the big ones here are RPSTL/TM
-    #     formats the parser doesn't handle anyway.
+    # older IPBs whose embedded OCR layer the column parser can't align).
+    # ``triage.ocr_ready`` is the single source of truth for whether this can
+    # run at all (tesseract present, page count within budget) — born-digital
+    # docs never reach here either way, since their 0-row parse means the
+    # *format* is unsupported (e.g. an Army TM RPSTL work package), which
+    # re-OCR won't fix.
     text_layer_source = True
-    if (
-        triage.extraction_class != "born-digital"
-        and not entries
-        and ocr_available()
-        and triage.page_count <= _OCR_PAGE_BUDGET
-    ):
+    if triage.extraction_class != "born-digital" and not entries and triage.ocr_ready:
         try:
             ocr_pages = ocr_page_texts(pdf_path)
         except Exception as err:
@@ -132,6 +125,8 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
             ocr_entries, ocr_figures = parse_parts_lists(ocr_pages)
             if len(ocr_entries) > len(entries):
                 entries, figures = ocr_entries, ocr_figures
+                for entry in entries:
+                    entry.extraction_method = "tesseract-ocr"
                 metadata = parse_to_metadata(ocr_pages, filename=pdf_path.name)
                 notes.append(f"text source: tesseract OCR ({len(entries)} rows)")
                 text_layer_source = False
@@ -158,7 +153,8 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         # that page forward (a parts page often doesn't repeat the column header,
         # so header-only detection misses the continuation). Bounded by the budget.
         signal_pages = sorted(
-            {e.page_number for e in entries if e.page_number} | set(_parts_header_pages(pages))
+            {e.page_number for e in entries if e.page_number}
+            | set(_parts_header_pages(pages))
         )
         drawing_pages: list[int] = []
         classified = False
@@ -204,7 +200,11 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
             for dp in drawing_pages:
                 if dp not in have_pages:
                     figures.append(
-                        FigureRecord(figure_number=f"P{dp}", figure_title="(drawing)", page_number=dp)
+                        FigureRecord(
+                            figure_number=f"P{dp}",
+                            figure_title="(drawing)",
+                            page_number=dp,
+                        )
                     )
         try:
             v_entries, v_stats = vision_parse_parts(
@@ -218,11 +218,20 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         except Exception as err:
             warnings.append(f"vision parts reader failed: {err}")
         else:
-            if v_entries:
+            # Replace only when vision actually recovers MORE rows — a garbled
+            # text pass is the reason vision runs, but a thin vision read (wrong
+            # candidate pages, refused pages) must not clobber a richer text
+            # parse. Mirrors the OCR fallback's better-source rule above.
+            if len(v_entries) > len(entries):
                 entries = v_entries
                 text_layer_source = False
                 notes.append(
                     f"vision parts reader: {len(v_entries)} rows from {v_stats['calls']} page(s)"
+                )
+            elif v_entries:
+                notes.append(
+                    f"vision parts reader kept text rows ({len(v_entries)} vision "
+                    f"vs {len(entries)} text)"
                 )
 
     # Row boxes for in-page highlighting (text-layer coordinates only).
@@ -238,19 +247,41 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
 
     # Figure callouts <-> parts (clickable hotspots). Render each figure sheet,
     # OCR its index callouts, and wire the bidirectional link. Best-effort and
-    # only when a media directory is provided (the publish path).
-    if media_dir is not None and entries and figures:
+    # only when a media directory is provided (the publish path). Every
+    # figure sheet renders and publishes here regardless of whether a parts
+    # list exists on this document — ``attach_hotspots`` only skips the
+    # callout OCR/link step (which needs a parts index to validate against)
+    # when there are no entries, not the image render itself. Without this, a
+    # figure-only PDF (a drawing-only appendix, no MPL page at all) would
+    # parse a real figure count but publish zero images / no manifest.
+    hotspot_coverage: dict | None = None
+    if media_dir is not None and figures:
         try:
             from docling_serve.technical_order.figure_hotspots import attach_hotspots
 
-            hs_stats = attach_hotspots(pdf_path, entries, figures, media_dir, vision=vision)
+            hs_stats = attach_hotspots(
+                pdf_path, entries, figures, media_dir, vision=vision
+            )
             notes.append(
                 f"figure hotspots: {hs_stats['hotspots']} callouts on "
                 f"{hs_stats['rendered']} sheet(s) "
                 f"({hs_stats.get('visionHotspots', 0)} via vision in "
                 f"{hs_stats.get('visionCalls', 0)} call(s)), "
-                f"{hs_stats['linkedParts']} parts linked"
+                f"{hs_stats['linkedParts']} parts linked; coverage "
+                f"{hs_stats.get('figuresWithHotspots', 0)}/{hs_stats.get('partsFigures', 0)} "
+                f"parts figures"
             )
+            hotspot_coverage = {
+                k: hs_stats.get(k, 0)
+                for k in (
+                    "partsFigures",
+                    "figuresWithHotspots",
+                    "figuresMissingHotspots",
+                    "secondChanceCalls",
+                    "visionCalls",
+                    "visionHotspots",
+                )
+            }
         except Exception as err:  # pragma: no cover - rendering env dependent
             warnings.append(f"figure hotspot pass failed: {err}")
 
@@ -262,6 +293,39 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         figures=figures,
         source_key=source_key,
     )
+    if hotspot_coverage is not None:
+        bom["stats"]["hotspotCoverage"] = hotspot_coverage
+
+    # Full-document structured content: front matter, headings, paragraphs,
+    # admonitions — everything the BOM/figure passes didn't claim, so the
+    # whole manual is digitally redisplayable (captify.to-content.v1).
+    try:
+        from docling_serve.technical_order.content import parse_content
+
+        figure_pages: dict[int, dict] = {}
+        for f in figures:
+            figure_pages.setdefault(f.page_number, f.as_dict())
+        content = parse_content(
+            pages,
+            figure_pages=figure_pages,
+            parts_pages={e.page_number for e in entries if e.page_number},
+            figure_numbers={f.figure_number for f in figures},
+            part_entries=[
+                {"partNumber": e.part_number_raw, "sequence": e.sequence}
+                for e in entries
+                if e.part_number_raw
+            ],
+            document_id=bom["id"],
+            markings=bom["document"].get("markings"),
+        )
+        bom["content"] = content
+        notes.append(
+            "content blocks: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(content["blockCounts"].items()))
+        )
+    except Exception as err:  # pragma: no cover - never blocks the BOM
+        warnings.append(f"content extraction failed: {err}")
+
     return {
         "schema": BOM_SCHEMA_ID,
         "documentNumber": metadata.document_number,
@@ -271,6 +335,10 @@ def extract_technical_order(  # noqa: C901 - linear multi-stage pipeline; cleare
         "entryCount": len(entries),
         "figureCount": len(figures),
         "figures": [f.as_dict() for f in figures],
+        # Multi-sheet drawing grouping/composition metadata (see
+        # bundle.build_figure_groups) — same data as bom.figureGroups,
+        # surfaced at the top level for callers that don't need the full BOM.
+        "figureGroups": bom["figureGroups"],
         "bom": bom,
         "notes": notes,
         "warnings": warnings,

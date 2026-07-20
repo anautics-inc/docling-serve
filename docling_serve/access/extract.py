@@ -13,7 +13,11 @@ sealed air-gapped image like any other wheel (no OS package, no EPEL).
 
 from __future__ import annotations
 
+import base64
 import logging
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -85,9 +89,22 @@ def access_to_markdown(path: Path) -> tuple[str, list[dict[str, int | str]]]:
     GitHub-flavored markdown table — the same shape docling emits for native
     spreadsheets, so downstream chunking/graph treat it identically.
     """
-    db = _load(path)
+    markdown, summaries, _ = extract_access(path)
+    return markdown, summaries
+
+
+def extract_access(
+    path: Path,
+) -> tuple[str, list[dict[str, int | str]], list[dict[str, Any]]]:
+    """Extract markdown, summaries, and row-oriented tables in one parser pass."""
+    try:
+        db = _load(path)
+    except Exception as error:
+        _log.warning("access-parser could not open %s; trying Jackcess: %s", path, error)
+        return _jackcess_extract(path)
     parts: list[str] = [f"# {path.stem}", ""]
     summaries: list[dict[str, int | str]] = []
+    tabular_tables: list[dict[str, Any]] = []
     for table in _user_tables(db):
         try:
             header, rows = _table_grid(db, table)
@@ -95,11 +112,83 @@ def access_to_markdown(path: Path) -> tuple[str, list[dict[str, int | str]]]:
             _log.warning("access-parser failed on table %s: %s", table, err)
             continue
         summaries.append({"name": table, "columns": len(header), "rows": len(rows)})
+        tabular_tables.append(
+            {
+                "name": table,
+                "columns": header,
+                "rows": [dict(zip(header, row, strict=False)) for row in rows],
+            }
+        )
         parts.append(f"## {table}")
         parts.append("")
         parts.append(_markdown_table(header, rows))
         parts.append("")
-    return "\n".join(parts).rstrip() + "\n", summaries
+    return "\n".join(parts).rstrip() + "\n", summaries, tabular_tables
+
+
+def _jackcess_to_markdown(path: Path) -> tuple[str, list[dict[str, int | str]]]:
+    markdown, summaries, _ = _jackcess_extract(path)
+    return markdown, summaries
+
+
+def _jackcess_extract(
+    path: Path,
+) -> tuple[str, list[dict[str, int | str]], list[dict[str, Any]]]:
+    classpath = os.getenv("DOCLING_SERVE_JACKCESS_CLASSPATH", "").strip()
+    if not classpath:
+        raise RuntimeError(
+            "Access database is not supported by access-parser and "
+            "DOCLING_SERVE_JACKCESS_CLASSPATH is not configured."
+        )
+    source = Path(__file__).with_name("JackcessDump.java")
+    with tempfile.TemporaryDirectory(prefix="captify-jackcess-") as classes:
+        subprocess.run(
+            ["javac", "-cp", classpath, "-d", classes, str(source)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        completed = subprocess.run(
+            ["java", "-cp", f"{classpath}:{classes}", "JackcessDump", str(path), "10000"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    tables: dict[str, tuple[list[str], list[list[str]]]] = {}
+    for line in completed.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2 or fields[0] not in {"H", "R"}:
+            continue
+        decoded = [
+            base64.b64decode(value).decode("utf-8", errors="replace")
+            for value in fields[1:]
+        ]
+        table = decoded[0]
+        if table.startswith(_SYSTEM_TABLE_PREFIXES):
+            continue
+        if fields[0] == "H":
+            tables[table] = (decoded[1:], [])
+        elif table in tables:
+            tables[table][1].append(decoded[1:])
+
+    parts: list[str] = [f"# {path.stem}", ""]
+    summaries: list[dict[str, int | str]] = []
+    tabular_tables: list[dict[str, Any]] = []
+    for table, (header, rows) in tables.items():
+        summaries.append({"name": table, "columns": len(header), "rows": len(rows)})
+        tabular_tables.append(
+            {
+                "name": table,
+                "columns": header,
+                "rows": [dict(zip(header, row, strict=False)) for row in rows],
+            }
+        )
+        parts.extend((f"## {table}", "", _markdown_table(header, rows), ""))
+    if not summaries:
+        raise RuntimeError("Jackcess found no readable user tables.")
+    return "\n".join(parts).rstrip() + "\n", summaries, tabular_tables
 
 
 def dump_schema(path: Path) -> str:
@@ -139,11 +228,25 @@ def _markdown_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def _cell(value: object) -> str:
-    return _escape(value)
+    # Keep parsed values raw until the final markdown-rendering boundary. Escaping
+    # here as well as in ``_markdown_table`` turns ``\|`` into ``\\|``.
+    return "" if value is None else str(value)
 
 
 def _escape(cell: object) -> str:
-    # Escape pipes/newlines so a cell value can't break the markdown table grid.
+    """Escape table-delimiting pipes while preserving source backslashes."""
     if cell is None:
         return ""
-    return str(cell).replace("|", "\\|").replace("\n", " ").replace("\r", " ").strip()
+    text = str(cell).replace("\n", " ").replace("\r", " ").strip()
+    escaped: list[str] = []
+    backslash_run = 0
+    for char in text:
+        if char == "\\":
+            escaped.append(char)
+            backslash_run += 1
+            continue
+        if char == "|" and backslash_run % 2 == 0:
+            escaped.append("\\")
+        escaped.append(char)
+        backslash_run = 0
+    return "".join(escaped)

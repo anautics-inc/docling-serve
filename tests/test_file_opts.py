@@ -29,16 +29,20 @@ def auth_headers():
     return headers
 
 
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def app():
-    app = create_app()
+    original_auth_mode = docling_serve_settings.auth_mode
+    docling_serve_settings.auth_mode = "none"
+    try:
+        app = create_app()
+        async with LifespanManager(app) as manager:
+            print("Launching lifespan of app.")
+            yield manager.app
+    finally:
+        docling_serve_settings.auth_mode = original_auth_mode
 
-    async with LifespanManager(app) as manager:
-        print("Launching lifespan of app.")
-        yield manager.app
 
-
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def client(app):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://app.io"

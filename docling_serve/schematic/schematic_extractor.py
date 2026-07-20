@@ -32,36 +32,44 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from docling_serve.schematic._compat import write_json
-from docling_serve.schematic._compat import validate_artifact
+from docling_serve.capabilities import CAPABILITIES
+from docling_serve.ingestion.routing import looks_like_vector_pdf
+from docling_serve.providers import BedrockUnavailableError, get_bedrock_provider
+from docling_serve.schematic.artifacts import validate_artifact, write_json
 from docling_serve.schematic.base import (
     ExtractionContext,
     Extractor,
     ExtractorResult,
 )
-from docling_serve.schematic._compat import build_docling_structured
+from docling_serve.schematic.content_guard import (
+    classify_drawing_content,
+    has_raster_image,
+)
 from docling_serve.schematic.edml import graph_to_edml
 from docling_serve.schematic.kbl import graph_to_kbl
 from docling_serve.schematic.kicad_sch import (
     KicadConversionError,
-    inject_items,
-    net_wires_sexpr,
     stroked_line_geometry,
     svg_to_kicad_sch,
 )
 from docling_serve.schematic.label_verify import verify_component_labels
 from docling_serve.schematic.net_trace import ComponentBox, Pt, TracedNet, trace_nets
 from docling_serve.schematic.netlist import graph_to_kicad_netlist
+from docling_serve.schematic.pipeline.rendering import (
+    inject_net_wires,
+    render_kicad_previews,
+)
 from docling_serve.schematic.raster_lines import ocr_text_labels, raster_wire_polylines
 from docling_serve.schematic.spice import graph_to_spice
 from docling_serve.schematic.xml_export import graph_to_xml
-from docling_serve.providers import BedrockUnavailableError, get_bedrock_provider
 from docling_serve.settings import docling_serve_settings
 
 _log = logging.getLogger(__name__)
 
-SCHEMATIC_PROFILES = {"schematic", "schematics", "drawing", "drawings"}
-SCHEMATIC_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"}
+SCHEMATIC_PROFILES = set(CAPABILITIES["schematic"].profiles)
+_MAX_VECTOR_STREAM_OUTPUT_BYTES = 2_000_000
+_MAX_VECTOR_TOTAL_OUTPUT_BYTES = 8_000_000
+SCHEMATIC_SUFFIXES = set(CAPABILITIES["schematic"].extensions)
 
 SYSTEM_PROMPT = (
     "You are a senior electrical and systems engineer who reads engineering "
@@ -245,7 +253,12 @@ def _cached_understand_json(
     key_file: Path | None = None
     if cache_dir is not None:
         digest = hashlib.sha256()
-        for part in (png_bytes, prompt.encode(), system.encode(), provider.vision_model.encode()):
+        for part in (
+            png_bytes,
+            prompt.encode(),
+            system.encode(),
+            provider.vision_model.encode(),
+        ):
             digest.update(part)
         key_file = cache_dir / f"{digest.hexdigest()}.json"
         if key_file.is_file():
@@ -279,8 +292,11 @@ class SchematicExtractor(Extractor):
             return _looks_like_vector_drawing(ctx.resolve_source_file())
         return False
 
-    def build(self, ctx: ExtractionContext) -> ExtractorResult:
+    def build(self, ctx: ExtractionContext) -> ExtractorResult:  # noqa: C901 - linear extraction pipeline; splitting hurts clarity
         source_file = ctx.resolve_source_file()
+        bounded_to_figure_mode = (
+            ctx.profile or ""
+        ).strip().lower() == "technical-order-schematic"
         schematic_dir = ctx.bundle_dir / "schematic"
         schematic_dir.mkdir(parents=True, exist_ok=True)
 
@@ -308,9 +324,33 @@ class SchematicExtractor(Extractor):
         provider = get_bedrock_provider()
         model_understood = False
         page_results: list[dict[str, Any]] = []
+        # Non-schematic guard: a raster page whose printed caption/body reads
+        # as a mechanical exploded-view / parts-breakdown figure (and shows no
+        # schematic vocabulary or refDes-shaped token) is refused instead of
+        # being sent through the "components + nets" prompt — that prompt
+        # would otherwise fabricate a plausible-looking but meaningless
+        # circuit graph for artwork that has no circuit to trace.
+        raster_backed = source_file.suffix.lower() == ".pdf" and has_raster_image(
+            source_file
+        )
+        rejected_pages: list[int] = []
         if provider.enabled and page_images:
             for page_no, png_bytes in page_images:
-                ctx.report_progress("schematic_model_read", page=page_no, pages=len(page_images))
+                page_text = " ".join(
+                    label[4] for label in page_text_labels.get(page_no, [])
+                )
+                verdict = classify_drawing_content(
+                    raster_backed=raster_backed, page_text=page_text
+                )
+                if verdict.is_non_schematic:
+                    rejected_pages.append(page_no)
+                    warnings.append(
+                        f"page {page_no}: refused schematic extraction ({verdict.reason})"
+                    )
+                    continue
+                ctx.report_progress(
+                    "schematic_model_read", page=page_no, pages=len(page_images)
+                )
                 try:
                     result, cached = _cached_understand_json(
                         provider,
@@ -324,7 +364,9 @@ class SchematicExtractor(Extractor):
                     if cached:
                         notes.append(f"page {page_no}: model pass served from cache")
                 except BedrockUnavailableError as err:
-                    _log.warning("Schematic model pass failed on page %s: %s", page_no, err)
+                    _log.warning(
+                        "Schematic model pass failed on page %s: %s", page_no, err
+                    )
                     warnings.append(f"page {page_no}: model pass failed ({err})")
                     continue
                 # Second, detection-only pass: box EVERY symbol so unboxed
@@ -343,33 +385,47 @@ class SchematicExtractor(Extractor):
                         png_bytes=png_bytes,
                     )
                 except BedrockUnavailableError as err:
-                    _log.warning("Schematic detection pass failed on page %s: %s", page_no, err)
+                    _log.warning(
+                        "Schematic detection pass failed on page %s: %s", page_no, err
+                    )
                     warnings.append(f"page {page_no}: detection pass failed ({err})")
                 # Tiled detection: the whole-page image reaches the model
                 # downscaled, so SMALL symbols (inline connector stubs,
                 # terminal ovals) go unboxed — and unboxed terminals can't
                 # anchor nets. Quadrant tiles at render resolution catch them.
-                ctx.report_progress("schematic_model_detect_tiles", page=page_no)
-                tiles = _tiled_detection(provider, png_bytes, page_no=page_no, warnings=warnings)
-                if tiles:
-                    result["__detection_tiles__"] = tiles
-                # Third pass: re-read each significant component's labels from
-                # an isolated crop. Whole-page reading binds parts to wrong
-                # refDes on dense drawings; focused transcription corrects it.
-                ctx.report_progress("schematic_verify_labels", page=page_no)
-                corrections = verify_component_labels(
-                    result,
-                    png_bytes,
-                    understand=lambda prompt, system, png: _cached_understand_json(
-                        provider, prompt=prompt, system=system, png_bytes=png
-                    )[0],
-                )
-                if corrections:
-                    notes.append(f"page {page_no}: {corrections} label(s) corrected by crop verification")
+                if not bounded_to_figure_mode:
+                    ctx.report_progress("schematic_model_detect_tiles", page=page_no)
+                    tiles = _tiled_detection(
+                        provider, png_bytes, page_no=page_no, warnings=warnings
+                    )
+                    if tiles:
+                        result["__detection_tiles__"] = tiles
+                    # Re-read significant component labels from isolated crops.
+                    ctx.report_progress("schematic_verify_labels", page=page_no)
+                    corrections = verify_component_labels(
+                        result,
+                        png_bytes,
+                        understand=lambda prompt, system, png: _cached_understand_json(
+                            provider, prompt=prompt, system=system, png_bytes=png
+                        )[0],
+                    )
+                    if corrections:
+                        notes.append(
+                            f"page {page_no}: {corrections} label(s) corrected by crop verification"
+                        )
+        if bounded_to_figure_mode:
+            notes.append(
+                "technical_order_model_budget: whole-page understanding + detection only"
+            )
         elif not provider.enabled:
             notes.append("bedrock_disabled_geometry_only")
         elif not page_images:
             warnings.append("no_renderable_pages")
+        if rejected_pages:
+            notes.append(
+                f"non_schematic_content_guard: refused page(s) {rejected_pages} "
+                "(exploded-view / parts-breakdown artwork, not a circuit)"
+            )
 
         # Deterministic connectivity: trace wires in the vector geometry, cut
         # at the model-located component boxes. The model names components;
@@ -409,6 +465,7 @@ class SchematicExtractor(Extractor):
             provider=provider,
             ctx=ctx,
             notes=notes,
+            allow_model_enrichment=not bounded_to_figure_mode,
         )
         validate_artifact(graph, "schematic-graph.schema.json")
 
@@ -416,7 +473,9 @@ class SchematicExtractor(Extractor):
         write_json(graph_path, graph)
         artifacts = [graph_path.relative_to(ctx.bundle_dir).as_posix()]
         artifacts.extend(p.relative_to(ctx.bundle_dir).as_posix() for p in svg_paths)
-        artifacts.extend(p.relative_to(ctx.bundle_dir).as_posix() for p in kicad_sch_paths)
+        artifacts.extend(
+            p.relative_to(ctx.bundle_dir).as_posix() for p in kicad_sch_paths
+        )
 
         netlist_text = graph_to_kicad_netlist(graph, source_name=ctx.source_path.name)
         netlist_path = schematic_dir / f"{ctx.source_path.stem}.net"
@@ -481,7 +540,7 @@ class SchematicExtractor(Extractor):
         # Traced nets become REAL electrical (wire ...) objects in the KiCad
         # documents — without this a scanned page opens in KiCad as a picture
         # with zero wires, and even vector pages carry only graphic polylines.
-        _inject_net_wires(kicad_sch_paths, graph, notes)
+        inject_net_wires(kicad_sch_paths, graph, notes)
 
         # Sibling .kicad_pro per document: carries the generated-document ERC
         # policy so KiCad (ours and the user's) applies the same severities.
@@ -517,7 +576,7 @@ class SchematicExtractor(Extractor):
         # this render shows what the tool actually displays on open, so the
         # viewer can put it next to the original drawing for visual review.
         ctx.report_progress("schematic_kicad_render", pages=len(kicad_sch_paths))
-        kicad_render_paths = _render_kicad_previews(
+        kicad_render_paths = render_kicad_previews(
             kicad_sch_paths, schematic_dir, notes=notes
         )
         artifacts.extend(
@@ -530,7 +589,7 @@ class SchematicExtractor(Extractor):
         # report (checks + passed + checkedAt) lands on the manifest below;
         # a later revise refreshes it.
         ctx.report_progress("schematic_delivery_check")
-        from docling_serve.schematic.schematic_revision import (
+        from docling_serve.schematic.pipeline.delivery import (
             check_report_dict,
             run_delivery_checks,
         )
@@ -579,6 +638,7 @@ class SchematicExtractor(Extractor):
             "componentCount": len(graph["components"]),
             "netCount": len(graph["nets"]),
             "modelUnderstood": model_understood,
+            "nonSchematicPagesRejected": rejected_pages,
         }
 
         return ExtractorResult(
@@ -599,14 +659,18 @@ class SchematicExtractor(Extractor):
                     "xml": xml_path.relative_to(ctx.bundle_dir).as_posix(),
                     "kbl": kbl_path.relative_to(ctx.bundle_dir).as_posix(),
                     "spice": spice_path.relative_to(ctx.bundle_dir).as_posix(),
-                    "spiceRunnable": spice_run_path.relative_to(ctx.bundle_dir).as_posix(),
+                    "spiceRunnable": spice_run_path.relative_to(
+                        ctx.bundle_dir
+                    ).as_posix(),
                     "kicadPro": kicad_pro_rel,
                     "check": check_report,
                     "kicadRender": [
                         p.relative_to(ctx.bundle_dir).as_posix()
                         for p in kicad_render_paths
                     ],
-                    "svg": [p.relative_to(ctx.bundle_dir).as_posix() for p in svg_paths],
+                    "svg": [
+                        p.relative_to(ctx.bundle_dir).as_posix() for p in svg_paths
+                    ],
                     "kicadSch": [
                         p.relative_to(ctx.bundle_dir).as_posix()
                         for p in kicad_sch_paths
@@ -618,22 +682,16 @@ class SchematicExtractor(Extractor):
                     },
                     "componentCount": len(graph["components"]),
                     "netCount": len(graph["nets"]),
+                    "nonSchematicPagesRejected": rejected_pages,
                 }
             },
             notes=notes + warnings,
         )
 
     def _structural_base(self, ctx: ExtractionContext) -> dict[str, Any]:
-        if ctx.conv_res is not None and ctx.conv_res.document is not None:
-            try:
-                return build_docling_structured(ctx)
-            except Exception:
-                _log.warning(
-                    "Docling structural base failed for schematic %s; "
-                    "emitting minimal document",
-                    ctx.source_path,
-                    exc_info=True,
-                )
+        # The schematic graph is the authoritative typed output. Generic Docling
+        # structure is produced by the normal convert/chunk job and is not
+        # reconstructed through the removed deep-document compatibility layer.
         return _minimal_structured(ctx)
 
 
@@ -686,6 +744,7 @@ def _enrich_connectivity(
     provider: Any,
     ctx: ExtractionContext,
     notes: list[str],
+    allow_model_enrichment: bool = True,
 ) -> None:
     """Connectivity identifiers + printed pin recovery, in place.
 
@@ -721,7 +780,7 @@ def _enrich_connectivity(
         if pass_notes:
             notes.append(f"{note_tag}: {'; '.join(pass_notes[:10])}")
 
-    if provider.enabled and page_images:
+    if provider.enabled and page_images and allow_model_enrichment:
         from docling_serve.schematic.component_identity import (
             disambiguate_capacitor_glyphs,
         )
@@ -757,7 +816,7 @@ def _enrich_connectivity(
 
     text_pins = assign_pins_from_text(graph, page_text_labels)
     vision_pins = 0
-    if provider.enabled and page_images:
+    if provider.enabled and page_images and allow_model_enrichment:
         ctx.report_progress("schematic_identify_pins")
         vision_pins = assign_pins_with_vision(
             graph,
@@ -782,7 +841,7 @@ def _enrich_connectivity(
         strip_connector_passive_values,
     )
 
-    if provider.enabled and page_images:
+    if provider.enabled and page_images and allow_model_enrichment:
         ctx.report_progress("schematic_recover_values")
         recovered = recover_component_identity(
             graph,
@@ -803,9 +862,7 @@ def _enrich_connectivity(
         notes.append(f"value_reconcile: {reconciled} stale value(s) cleared")
     stripped = strip_connector_passive_values(graph)
     if stripped:
-        notes.append(
-            f"connector_value_cleanup: {stripped} harvested value(s) cleared"
-        )
+        notes.append(f"connector_value_cleanup: {stripped} harvested value(s) cleared")
     from docling_serve.schematic.connectivity_ids import normalize_quantity_values
 
     quantities = normalize_quantity_values(graph)
@@ -837,12 +894,15 @@ def _minimal_structured(ctx: ExtractionContext) -> dict[str, Any]:
 
     return {
         "schemaVersion": "1.0",
-        "artifactKind": "deep_document",
+        "artifactKind": "schematic_bundle",
         "documentId": "doc-schematic",
         "sourceManifestKey": ctx.source_manifest_key,
         "createdAt": datetime.now(UTC).isoformat(),
         "source": {"originalFileName": ctx.source_path.name, "fileKind": "schematic"},
-        "storage": {"layout": "relative_object_tree", "manifestPath": "deep-document.json"},
+        "storage": {
+            "layout": "relative_object_tree",
+            "manifestPath": "deep-document.json",
+        },
         "document": {
             "title": ctx.source_path.stem,
             "unitCount": 0,
@@ -898,7 +958,9 @@ def _render_svgs(pdf_path: Path, out_dir: Path, *, max_pages: int) -> list[Path]
             break
         except subprocess.SubprocessError as err:
             # One bad page must not drop geometry for the rest of the drawing set.
-            _log.warning("pdftocairo SVG export failed for %s p%s: %s", pdf_path, page_no, err)
+            _log.warning(
+                "pdftocairo SVG export failed for %s p%s: %s", pdf_path, page_no, err
+            )
             continue
     return written
 
@@ -932,19 +994,21 @@ def _trace_all_pages(
     traced: dict[int, list[TracedNet]] = {}
     for result in page_results:
         page_no = int(result.get("__page__") or 1)
-        svg_path = svg_by_page.get(page_no)
-        if svg_path is None:
+        page_svg_path = svg_by_page.get(page_no)
+        if page_svg_path is None:
             continue
         try:
             page_labels = (text_boxes_by_page or {}).get(page_no) or []
             nets = _trace_page_nets(
-                svg_path.read_text(),
+                page_svg_path.read_text(),
                 result,
                 raster_png=png_by_page.get(page_no),
                 text_boxes_pt=[label[:4] for label in page_labels],
             )
         except Exception as err:  # geometry tracing must never fail the job
-            _log.warning("Net tracing failed for page %s: %s", page_no, err, exc_info=True)
+            _log.warning(
+                "Net tracing failed for page %s: %s", page_no, err, exc_info=True
+            )
             warnings.append(f"page {page_no}: geometric net tracing failed ({err})")
             continue
         if nets is not None:
@@ -952,9 +1016,7 @@ def _trace_all_pages(
     return traced
 
 
-def _scale_bboxes_to_pt(
-    result: dict[str, Any], page_w: float, page_h: float
-) -> bool:
+def _scale_bboxes_to_pt(result: dict[str, Any], page_w: float, page_h: float) -> bool:
     """Scale a model result's component bboxes into page pt, in place.
 
     Bboxes are scaled from the model's self-reported ``imageSize`` pixel space
@@ -982,7 +1044,12 @@ def _scale_bboxes_to_pt(
             x0, y0, x1, y1 = (float(v) for v in bbox)
         except (TypeError, ValueError):
             continue
-        component["bboxPt"] = [round(x0 * sx, 2), round(y0 * sy, 2), round(x1 * sx, 2), round(y1 * sy, 2)]
+        component["bboxPt"] = [
+            round(x0 * sx, 2),
+            round(y0 * sy, 2),
+            round(x1 * sx, 2),
+            round(y1 * sy, 2),
+        ]
     return True
 
 
@@ -1004,7 +1071,7 @@ def _is_page_scale_box(bbox_pt: list[float], page_w: float, page_h: float) -> bo
     return area > page_w * page_h * TUNING.trace_max_clip_box_page_frac
 
 
-def _reregister_detection_frame(
+def _reregister_detection_frame(  # noqa: C901
     main_components: list[dict[str, Any]], detection: dict[str, Any]
 ) -> bool:
     """Map a detection pass's ``bboxPt`` boxes onto the main pass's frame.
@@ -1239,7 +1306,9 @@ def _merge_detected_components(
             # (same derivation as _normalize_graph) — make it unique so two
             # anonymous symbols of the same type don't collapse into one node.
             "description": (
-                None if ref else f"{detected_type or 'component'} (detected #{anonymous})"
+                None
+                if ref
+                else f"{detected_type or 'component'} (detected #{anonymous})"
             ),
             "pins": [],
             "bboxPt": bbox_pt,
@@ -1298,7 +1367,9 @@ def _trace_page_nets(
         ("__detection_tiles__", "tiled detection"),
     ):
         detection = result.get(detection_key)
-        if isinstance(detection, dict) and _scale_bboxes_to_pt(detection, page_w, page_h):
+        if isinstance(detection, dict) and _scale_bboxes_to_pt(
+            detection, page_w, page_h
+        ):
             # Both passes are now nominally in page pt, but a pass that
             # mis-reported its imageSize (or a cached response from an older
             # prompt) still sits in its own frame. Re-register onto the main
@@ -1328,7 +1399,11 @@ def _trace_page_nets(
         # nets via model claims / segment-terminus reattachment.
         if _is_page_scale_box([float(v) for v in bbox_pt], page_w, page_h):
             continue
-        key = component.get("refDes") or component.get("description") or f"component-{index}"
+        key = (
+            component.get("refDes")
+            or component.get("description")
+            or f"component-{index}"
+        )
         boxes.append(ComponentBox(str(key), *(float(v) for v in bbox_pt)))
 
     if len(boxes) < 2:
@@ -1397,9 +1472,7 @@ def _result_page_size_pt(result: dict[str, Any]) -> tuple[float, float] | None:
     return None
 
 
-def _pdf_text_boxes(
-    source_path: Path, *, max_pages: int
-) -> dict[int, list[TextLabel]]:
+def _pdf_text_boxes(source_path: Path, *, max_pages: int) -> dict[int, list[TextLabel]]:
     """Text-layer rectangles (with contents) per page in page-pt, top-left origin.
 
     Scanned drawings usually carry an OCR text layer. Its rectangles let the
@@ -1431,7 +1504,9 @@ def _pdf_text_boxes(
                     left, bottom, right, top = textpage.get_rect(rect_index)
                     text = textpage.get_text_bounded(left, bottom, right, top) or ""
                     # pdfium rects are y-up; tracer space is y-down.
-                    rects.append((left, page_h - top, right, page_h - bottom, text.strip()))
+                    rects.append(
+                        (left, page_h - top, right, page_h - bottom, text.strip())
+                    )
                 if rects:
                     boxes[page_index + 1] = rects
             except Exception:  # pragma: no cover - a bad page shouldn't abort
@@ -1584,154 +1659,8 @@ def _prepare_page_artifacts(
     return svg_paths, kicad_sch_paths, page_images, page_text_labels
 
 
-def _inject_net_wires(
-    kicad_sch_paths: list[Path], graph: dict[str, Any], notes: list[str]
-) -> None:
-    """Write the graph's electrical/semantic elements into each page's KiCad file.
-
-    Geometry replay alone yields graphics/bitmaps, which KiCad treats as
-    decoration — the drawing would open with zero electrical objects. This
-    pass makes the document EDITABLE: traced nets become real wires,
-    junction dots assert T-connections, net-name labels bind identity to
-    the copper (the netlist still says A8B22 after edits), and component
-    boxes + printed designators annotate what each region is.
-    """
-    from docling_serve.schematic.kicad_sch import (
-        component_annotation_sexprs,
-        junction_sexprs,
-        net_label_sexprs,
-    )
-    from docling_serve.schematic.kicad_symbols import (
-        SymbolLibrary,
-        build_symbol_instances,
-        document_sheet_uuid,
-        embed_lib_symbols,
-        find_symbol_dir,
-    )
-
-    nets = graph.get("nets") or []
-    components = graph.get("components") or []
-    symbol_dir = find_symbol_dir()
-    library = SymbolLibrary(symbol_dir) if symbol_dir else None
-    total = {"wires": 0, "junctions": 0, "labels": 0, "annotations": 0, "symbols": 0}
-    for page_index, kicad_path in enumerate(kicad_sch_paths, start=1):
-        text = kicad_path.read_text()
-        if "(wire (pts" in text:
-            continue  # idempotent: elements already injected into this document
-        wires = net_wires_sexpr(nets, page_no=page_index)
-        junctions = junction_sexprs(nets, page_no=page_index)
-        labels = net_label_sexprs(nets, page_no=page_index)
-        annotations = component_annotation_sexprs(components, page_no=page_index)
-        items = wires + junctions + labels + annotations
-        if library is not None:
-            # Standard-library symbol instances: typed components become real
-            # KiCad symbols (Device:R, Switch:SW_SPST, …) with stub wires to
-            # their traced attachment points — what ERC and the SPICE
-            # netlister operate on.
-            sheet_uuid = document_sheet_uuid(text)
-            lib_defs, symbol_items, mapped = build_symbol_instances(
-                graph,
-                page_no=page_index,
-                sheet_uuid=sheet_uuid,
-                library=library,
-            )
-            items += symbol_items
-            total["symbols"] += mapped
-            if page_index == 1:
-                # Auto-detected supplies + .op card ON the sheet: the KiCad
-                # simulator's RUN button then solves the same model as the
-                # published .run.cir, no manual source wiring.
-                from docling_serve.schematic.kicad_symbols import (
-                    simulation_stimulus_items,
-                )
-
-                page_height = next(
-                    (
-                        float(p.get("height"))
-                        for p in graph.get("pages") or []
-                        if isinstance(p, dict) and p.get("height")
-                    ),
-                    792.0,
-                )
-                sim_defs, sim_items, sim_notes = simulation_stimulus_items(
-                    graph,
-                    library,
-                    sheet_uuid=sheet_uuid,
-                    page_height_pt=page_height,
-                )
-                lib_defs.update(sim_defs)
-                items += sim_items
-                notes.extend(sim_notes)
-            text = embed_lib_symbols(text, lib_defs)
-        if items:
-            kicad_path.write_text(inject_items(text, items))
-        total["wires"] += len(wires)
-        total["junctions"] += len(junctions)
-        total["labels"] += len(labels)
-        total["annotations"] += len(annotations)
-    if any(total.values()):
-        notes.append(
-            "kicad_elements: "
-            + ", ".join(f"{count} {kind}" for kind, count in total.items() if count)
-        )
-
-
-def _render_kicad_previews(
-    kicad_sch_paths: list[Path], schematic_dir: Path, *, notes: list[str]
-) -> list[Path]:
-    """Plot each generated ``.kicad_sch`` back to SVG via KiCad itself.
-
-    ``kicad-cli sch export svg`` produces exactly what KiCad displays on
-    open — the visual round-trip proof. Best-effort: skipped (with a note)
-    when kicad-cli isn't installed; a render failure for one page never
-    fails the job.
-    """
-    import shutil as _shutil
-    import tempfile
-
-    if not kicad_sch_paths:
-        return []
-    if not _shutil.which("kicad-cli"):
-        notes.append("kicad_render_unavailable: kicad-cli not installed")
-        return []
-    from docling_serve.schematic.kicad_symbols import ensure_kicad_cli_config
-
-    ensure_kicad_cli_config()
-
-    renders: list[Path] = []
-    for index, sch_path in enumerate(kicad_sch_paths, start=1):
-        try:
-            with tempfile.TemporaryDirectory() as out_dir:
-                result = subprocess.run(
-                    [
-                        "kicad-cli",
-                        "sch",
-                        "export",
-                        "svg",
-                        "--no-background-color",
-                        "--output",
-                        out_dir,
-                        str(sch_path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=300,
-                )
-                if result.returncode != 0:
-                    notes.append(
-                        f"kicad_render_failed page {index}: {result.stderr.strip()[:160]}"
-                    )
-                    continue
-                produced = sorted(Path(out_dir).glob("*.svg"))
-                if not produced:
-                    notes.append(f"kicad_render_failed page {index}: no svg produced")
-                    continue
-                target = schematic_dir / f"kicad-render-page-{index:03d}.svg"
-                target.write_bytes(produced[0].read_bytes())
-                renders.append(target)
-        except Exception as error:  # pragma: no cover - environment dependent
-            notes.append(f"kicad_render_failed page {index}: {error}")
-    return renders
+_inject_net_wires = inject_net_wires
+_render_kicad_previews = render_kicad_previews
 
 
 def _backfill_raster_kicad(
@@ -1851,7 +1780,9 @@ def _render_page_pngs(
                 pil_image = bitmap.to_pil()
                 images.append((index + 1, _encode_png(pil_image)))
             except Exception as err:  # pragma: no cover
-                _log.warning("Render failed for %s page %s: %s", source_path, index + 1, err)
+                _log.warning(
+                    "Render failed for %s page %s: %s", source_path, index + 1, err
+                )
     finally:
         pdf.close()
     return images
@@ -1882,32 +1813,17 @@ def _normalise_raster(raw: bytes, *, max_bytes: int = 4_000_000) -> bytes:
 
 
 def _looks_like_vector_drawing(pdf_path: Path) -> bool:
-    """Heuristic router for ``profile=auto``: vector-heavy PDF with no images.
-
-    Used only to *route* to this extractor; the model still does the
-    understanding. Conservative: returns False on any uncertainty.
-    """
+    """Compatibility wrapper for the authoritative bounded PDF signal."""
     try:
-        import re
-        import zlib
-
         data = pdf_path.read_bytes()
     except Exception:  # pragma: no cover
         return False
-    if b"/Subtype /Image" in data or b"/Subtype/Image" in data:
-        return False
-    streams = re.findall(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S)
-    path_ops = 0
-    for stream in streams[:200]:
-        try:
-            decoded = zlib.decompress(stream)
-        except Exception:
-            continue
-        for op in (rb"(?<![A-Za-z])l(?![A-Za-z])", rb"(?<![A-Za-z])c(?![A-Za-z])"):
-            path_ops += len(re.findall(op, decoded))
-        if path_ops > 200:
-            return True
-    return path_ops > 200
+    return looks_like_vector_pdf(
+        data,
+        max_streams=200,
+        max_stream_output_bytes=_MAX_VECTOR_STREAM_OUTPUT_BYTES,
+        max_total_output_bytes=_MAX_VECTOR_TOTAL_OUTPUT_BYTES,
+    )
 
 
 def _normalize_graph(
@@ -1957,15 +1873,28 @@ def _normalize_graph(
     comp_by_id: dict[str, dict[str, Any]] = {}
     comp_counter = 0
 
-    raster_by_page = {page_no: f"media/schematic-page-{page_no:03d}.png" for page_no, _ in page_images}
+    raster_by_page = {
+        page_no: f"media/schematic-page-{page_no:03d}.png" for page_no, _ in page_images
+    }
 
     for result in page_results:
         page_no = int(result.get("__page__") or 1)
-        title_block = result.get("titleBlock") if isinstance(result.get("titleBlock"), dict) else {}
+        title_block = (
+            result.get("titleBlock")
+            if isinstance(result.get("titleBlock"), dict)
+            else {}
+        )
         pages.append(
             {
                 "pageNumber": page_no,
-                "svg": next((s for s in svg_paths if f"page-{page_no:03d}" in s or s.endswith("schematic.svg")), None),
+                "svg": next(
+                    (
+                        s
+                        for s in svg_paths
+                        if f"page-{page_no:03d}" in s or s.endswith("schematic.svg")
+                    ),
+                    None,
+                ),
                 "raster": raster_by_page.get(page_no),
                 "titleBlock": title_block or {},
             }
@@ -1988,12 +1917,15 @@ def _normalize_graph(
                 page_key_to_id=page_key_to_id,
             )
 
-        for ground_index, ground in enumerate(result.get("groundPoints") or [], start=1):
+        for ground_index, ground in enumerate(
+            result.get("groundPoints") or [], start=1
+        ):
             if not isinstance(ground, dict):
                 continue
             ground_points.append(
                 {
-                    "id": _str_or_none(ground.get("id")) or f"GND{page_no:03d}-{ground_index:02d}",
+                    "id": _str_or_none(ground.get("id"))
+                    or f"GND{page_no:03d}-{ground_index:02d}",
                     "name": _str_or_none(ground.get("name")),
                     "location": _str_or_none(ground.get("location")),
                     "page": page_no,
@@ -2080,7 +2012,9 @@ def _normalize_graph(
         "groundPoints": ground_points,
         "confidence": (sum(confidences) / len(confidences)) if confidences else None,
         "warnings": all_warnings,
-        "notes": [] if understood else ["geometry exported; model understanding unavailable"],
+        "notes": []
+        if understood
+        else ["geometry exported; model understanding unavailable"],
     }
 
 
@@ -2104,6 +2038,7 @@ def _ingest_component(
 
     existing = comp_by_id.get(ref_to_id[ref_key]) if ref_key in ref_to_id else None
     if existing is not None:
+        assert ref_des is not None
         # Same refDes on another sheet: ONE component. Union pins; keep
         # first-seen scalar fields, fill blanks from the new sighting.
         comp_id = existing["id"]
@@ -2126,7 +2061,14 @@ def _ingest_component(
                     "net": None,
                 }
             )
-        for field in ("type", "value", "description", "partNumber", "location", "parentComponent"):
+        for field in (
+            "type",
+            "value",
+            "description",
+            "partNumber",
+            "location",
+            "parentComponent",
+        ):
             if not existing.get(field):
                 existing[field] = _str_or_none(component.get(field))
         page_key_to_id[(page_no, ref_des)] = comp_id
@@ -2201,9 +2143,8 @@ def _model_nets_to_graph_nets(
             ref = node.get("refDes")
             if ref is None:
                 continue
-            comp_id = (
-                ref_to_id.get(str(ref).upper())
-                or page_key_to_id.get((page_no, str(ref)))
+            comp_id = ref_to_id.get(str(ref).upper()) or page_key_to_id.get(
+                (page_no, str(ref))
             )
             nodes.append(
                 {
@@ -2315,7 +2256,9 @@ def _traced_to_graph_nets(
     ``_merge_named_nets`` unifies them afterwards.
     """
     _LABEL_FIELDS = ("name", "class", "wireId", "gauge", "signalType")
-    labeled_model_sets: list[tuple[set[str], dict[str, str | None], dict[str, list[str]]]] = []
+    labeled_model_sets: list[
+        tuple[set[str], dict[str, str | None], dict[str, list[str]]]
+    ] = []
     for net in model_nets:
         labels = {field: _str_or_none(net.get(field)) for field in _LABEL_FIELDS}
         refs: set[str] = set()
@@ -2350,7 +2293,9 @@ def _traced_to_graph_nets(
         claimed_by_ref = assignments[traced_index][1]
         for ref in traced_net.components:
             ref_key = ref.upper()
-            points = traced_net.attachments.get(ref) or [None]
+            points: list[tuple[float, float] | None] = list(
+                traced_net.attachments.get(ref) or []
+            ) or [None]
             available = [
                 pin
                 for pin in claimed_by_ref.get(ref_key, [])
@@ -2380,16 +2325,19 @@ def _traced_to_graph_nets(
             comp_id = (
                 ref_to_id.get(ref.upper()) or page_key_to_id.get((page_no, ref)) or ref
             )
-            points = traced_net.attachments.get(ref) or [None]
+            points = list(traced_net.attachments.get(ref) or []) or [None]
             planned = pin_plan.get((traced_index, ref)) or [None] * len(points)
             for slot, point in enumerate(points):
                 pin = planned[slot] if slot < len(planned) else None
-                node: dict[str, Any] = {"component": comp_id, "pin": pin}
+                graph_node: dict[str, Any] = {"component": comp_id, "pin": pin}
                 if pin:
-                    node["pinSource"] = "model"
+                    graph_node["pinSource"] = "model"
                 if point is not None:
-                    node["attachment"] = [round(point[0], 1), round(point[1], 1)]
-                nodes.append(node)
+                    graph_node["attachment"] = [
+                        round(point[0], 1),
+                        round(point[1], 1),
+                    ]
+                nodes.append(graph_node)
         graph_nets.append(
             {
                 "id": f"N{page_no:03d}-{index:04d}",
@@ -2438,7 +2386,9 @@ def _tracing_adequate(
 
 def _assign_net_labels(
     traced: list[TracedNet],
-    labeled_model_sets: list[tuple[set[str], dict[str, str | None], dict[str, list[str]]]],
+    labeled_model_sets: list[
+        tuple[set[str], dict[str, str | None], dict[str, list[str]]]
+    ],
 ) -> list[tuple[dict[str, str | None], dict[str, list[str]], float]]:
     """Match each traced net to a model net's labels and pin claims.
 
@@ -2458,7 +2408,9 @@ def _assign_net_labels(
         best_pins: dict[str, list[str]] = {}
         best_score = 0.0
         best_model = -1
-        for model_index, (model_refs, labels, pins_by_ref) in enumerate(labeled_model_sets):
+        for model_index, (model_refs, labels, pins_by_ref) in enumerate(
+            labeled_model_sets
+        ):
             shared = len(refs_upper & model_refs)
             if shared < 2:
                 continue
@@ -2480,8 +2432,12 @@ def _assign_net_labels(
         ref_upper = traced_net.components[0].upper()
         candidates = [
             model_index
-            for model_index, (model_refs, labels, _pins) in enumerate(labeled_model_sets)
-            if model_index not in adopted and ref_upper in model_refs and labels.get("name")
+            for model_index, (model_refs, labels, _pins) in enumerate(
+                labeled_model_sets
+            )
+            if model_index not in adopted
+            and ref_upper in model_refs
+            and labels.get("name")
         ]
         if len(candidates) == 1:
             model_index = candidates[0]

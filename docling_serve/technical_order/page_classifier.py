@@ -56,7 +56,12 @@ def _thumb(pdf_path: Path, page: int, tmp: Path, dpi: int) -> bytes | None:
 
 
 def _classify_batch(
-    items: list[tuple[int, bytes]], *, base_url: str, api_key: str, model: str, timeout: float
+    items: list[tuple[int, bytes]],
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    timeout: float,
 ) -> dict[int, str]:
     content: list[dict] = [{"type": "text", "text": _PROMPT}]
     for page, data in items:
@@ -64,7 +69,9 @@ def _classify_batch(
         content.append(
             {
                 "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{base64.b64encode(data).decode()}"},
+                "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(data).decode()}"
+                },
             }
         )
     body = {
@@ -82,7 +89,10 @@ def _classify_batch(
         )
         resp.raise_for_status()
         text = str(
-            (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
+            (((resp.json().get("choices") or [{}])[0]).get("message") or {}).get(
+                "content"
+            )
+            or ""
         )
     except Exception as err:
         _log.info("page classify batch failed: %s", err)
@@ -99,7 +109,10 @@ def _classify_batch(
         if not isinstance(row, dict):
             continue
         try:
-            page = int(row.get("page"))
+            page_value = row.get("page")
+            if page_value is None:
+                continue
+            page = int(page_value)
         except (TypeError, ValueError):
             continue
         kind = str(row.get("type") or "").strip().lower()
@@ -142,7 +155,11 @@ def classify_pages(
         if items:
             result.update(
                 _classify_batch(
-                    items, base_url=base_url, api_key=api_key, model=model, timeout=timeout
+                    items,
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=model,
+                    timeout=timeout,
                 )
             )
     return result

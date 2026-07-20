@@ -73,7 +73,7 @@ def _new_wire(edb: Any, pedb: Any, name: str, classified: str) -> Any:
     return edb.NewWire(name)
 
 
-def graph_to_edb(
+def graph_to_edb(  # noqa: C901
     graph: dict[str, Any], output_path: Path, *, source_name: str
 ) -> dict[str, Any]:
     """Write ``output_path`` as a native EEvision EDB; returns build stats.

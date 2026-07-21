@@ -5,13 +5,13 @@
       "Sid": "VerifyLifecycle",
       "Effect": "Allow",
       "Action": "s3:GetLifecycleConfiguration",
-      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER"
+      "Resource": "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER"
     },
     {
       "Sid": "PutUploads",
       "Effect": "Allow",
       "Action": "s3:PutObject",
-      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
+      "Resource": "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
     },
     {
       "Sid": "ProbeCanary",
@@ -20,7 +20,7 @@
         "s3:GetObject",
         "s3:DeleteObject"
       ],
-      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/canary/*"
+      "Resource": "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/canary/*"
     },
     {
       "Sid": "DeleteFailedUploads",
@@ -29,13 +29,13 @@
         "s3:DeleteObject",
         "s3:DeleteObjectVersion"
       ],
-      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
+      "Resource": "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*"
     },
     {
       "Sid": "ListCleanupQueue",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER",
+      "Resource": "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER",
       "Condition": {
         "StringLike": {
           "s3:prefix": [
@@ -54,9 +54,9 @@
         "s3:DeleteObject"
       ],
       "Resource": [
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/queue/*",
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/dead/*",
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/claims/*"
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/queue/*",
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/dead/*",
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/claims/*"
       ]
     },
     {

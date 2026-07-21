@@ -20,6 +20,10 @@ The renderer fails closed for missing, mutable, malformed, or all-zero digests.
 Compose examples use the required `DOCLING_SERVE_IMAGE` environment variable and
 likewise expect a `repository@sha256:digest` value.
 
+For the existing GitLab-to-SSM GPU EC2 production path, use
+`../govcloud-gpu-installation.md`. Its protected file-variable template is
+`govcloud-production.env.example`.
+
 ## Captify receiver authentication
 
 Captify production deployments must load `captify-assertion.env.example` with
@@ -52,6 +56,14 @@ for split API and worker roles are
 `upload-staging-serviceaccounts.yaml` after rendering its role placeholders.
 RQ should use separate roles. Local and Ray execute conversion in the API/Serve
 pod, so their pod role must combine the API and worker statements.
+
+The existing single-container GovCloud GPU deployment uses the combined
+`govcloud-runtime-iam-policy.json.template`, which also grants
+`kms:GetPublicKey` on the assertion verification key. Render it with
+`--assertion-kms-key`. Render
+`upload-staging-bucket-policy.json.template` for the dedicated bucket. The
+renderer derives `aws-us-gov` from `--staging-region us-gov-*`; commercial S3
+ARNs are invalid for GovCloud.
 
 The provisioner reads the current lifecycle and upserts only the four stable
 source, cleanup-queue, dead-letter, and claim rules; unrelated compliance,

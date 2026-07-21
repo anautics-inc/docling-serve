@@ -1,0 +1,50 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER",
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/*"
+      ],
+      "Condition": {
+        "Bool": {
+          "aws:SecureTransport": "false"
+        }
+      }
+    },
+    {
+      "Sid": "DenyUploadsWithoutKmsEncryption",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*",
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "s3:x-amz-server-side-encryption": "aws:kms"
+        }
+      }
+    },
+    {
+      "Sid": "DenyUploadsUsingWrongKmsKey",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": [
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging/v1/*",
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/docling-staging-cleanup/v1/*"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "s3:x-amz-server-side-encryption-aws-kms-key-id": "DOCLING_STAGING_KMS_KEY_PLACEHOLDER"
+        }
+      }
+    }
+  ]
+}

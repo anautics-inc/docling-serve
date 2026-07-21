@@ -12,6 +12,10 @@ from scripts.render_deploy_example import (
 )
 
 VALID_IMAGE = f"registry.example.com/captify/docling-serve@sha256:{'a' * 64}"
+ASSERTION_KMS_KEY = (
+    "arn:aws-us-gov:kms:us-gov-west-1:123456789012:"
+    "key/87654321-4321-4321-4321-cba987654321"
+)
 STAGING_ARGS = {
     "staging_bucket": "captify-docling-staging-prod",
     "staging_region": "us-gov-west-1",
@@ -232,7 +236,13 @@ def test_runtime_staging_smoke_cannot_report_success_when_disabled(monkeypatch):
     ],
 )
 def test_staging_iam_lists_only_exact_cleanup_queue_prefix(template_name):
-    policy = json.loads(Path(f"docs/deploy-examples/{template_name}").read_text())
+    policy = json.loads(
+        render_manifest(
+            Path(f"docs/deploy-examples/{template_name}").read_text(),
+            VALID_IMAGE,
+            **STAGING_ARGS,
+        )
+    )
     list_statements = [
         statement
         for statement in policy["Statement"]
@@ -240,7 +250,7 @@ def test_staging_iam_lists_only_exact_cleanup_queue_prefix(template_name):
     ]
     assert len(list_statements) == 1
     statement = list_statements[0]
-    assert statement["Resource"] == ("arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER")
+    assert statement["Resource"] == ("arn:aws-us-gov:s3:::captify-docling-staging-prod")
     assert statement["Condition"] == {
         "StringLike": {
             "s3:prefix": [
@@ -258,10 +268,127 @@ def test_staging_iam_lists_only_exact_cleanup_queue_prefix(template_name):
         if item["Sid"] in {"ReconcileEncryptedCleanupQueue", "WriteCleanupQueueState"}
     )
     assert cleanup_statement["Resource"] == [
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/"
+        "arn:aws-us-gov:s3:::captify-docling-staging-prod/"
         "docling-staging-cleanup/v1/queue/*",
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/"
+        "arn:aws-us-gov:s3:::captify-docling-staging-prod/"
         "docling-staging-cleanup/v1/dead/*",
-        "arn:aws:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER/"
+        "arn:aws-us-gov:s3:::captify-docling-staging-prod/"
         "docling-staging-cleanup/v1/claims/*",
     ]
+
+
+def test_partition_renderer_uses_commercial_partition_outside_govcloud():
+    template = (
+        "arn:DOCLING_AWS_PARTITION_PLACEHOLDER:s3:::DOCLING_STAGING_BUCKET_PLACEHOLDER"
+    )
+    rendered = render_manifest(
+        template,
+        VALID_IMAGE,
+        staging_bucket="captify-docling-staging-prod",
+        staging_region="us-east-1",
+    )
+    assert rendered == "arn:aws:s3:::captify-docling-staging-prod"
+
+
+def test_govcloud_runtime_policy_is_complete_and_least_privilege():
+    policy = json.loads(
+        render_manifest(
+            Path(
+                "docs/deploy-examples/govcloud-runtime-iam-policy.json.template"
+            ).read_text(),
+            VALID_IMAGE,
+            assertion_kms_key=ASSERTION_KMS_KEY,
+            **STAGING_ARGS,
+        )
+    )
+    serialized = json.dumps(policy)
+    assert "arn:aws-us-gov:s3:::captify-docling-staging-prod" in serialized
+    assertion = next(
+        statement
+        for statement in policy["Statement"]
+        if statement["Sid"] == "ReadAssertionPublicKey"
+    )
+    assert assertion == {
+        "Sid": "ReadAssertionPublicKey",
+        "Effect": "Allow",
+        "Action": "kms:GetPublicKey",
+        "Resource": ASSERTION_KMS_KEY,
+    }
+    assert "kms:Sign" not in serialized
+    assert '"s3:*"' not in serialized
+
+
+def test_staging_bucket_policy_denies_non_tls_and_wrong_kms_key():
+    policy = json.loads(
+        render_manifest(
+            Path(
+                "docs/deploy-examples/upload-staging-bucket-policy.json.template"
+            ).read_text(),
+            VALID_IMAGE,
+            **STAGING_ARGS,
+        )
+    )
+    statements = {statement["Sid"]: statement for statement in policy["Statement"]}
+    assert statements["DenyInsecureTransport"]["Condition"] == {
+        "Bool": {"aws:SecureTransport": "false"}
+    }
+    assert statements["DenyUploadsWithoutKmsEncryption"]["Condition"] == {
+        "StringNotEquals": {"s3:x-amz-server-side-encryption": "aws:kms"}
+    }
+    assert statements["DenyUploadsUsingWrongKmsKey"]["Condition"] == {
+        "StringNotEquals": {
+            "s3:x-amz-server-side-encryption-aws-kms-key-id": STAGING_ARGS[
+                "staging_kms_key"
+            ]
+        }
+    }
+    assert "arn:aws:s3" not in json.dumps(policy)
+
+
+def test_govcloud_production_env_matches_existing_pipeline_guards():
+    path = Path("docs/deploy-examples/govcloud-production.env.example")
+    values = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in path.read_text().splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+    assert {
+        "DOCLING_SERVE_DEPLOYMENT_MODE",
+        "DOCLING_SERVE_AUTH_MODE",
+        "DOCLING_SERVE_UPLOAD_STAGING_MODE",
+        "DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID",
+        "DOCLING_SERVE_ENG_KIND",
+        "DOCLING_SERVE_LEGACY_OFFICE_EXECUTABLE",
+    } <= values.keys()
+    assert values["DOCLING_SERVE_DEPLOYMENT_MODE"] == "production"
+    assert values["DOCLING_SERVE_AUTH_MODE"] == "assertion"
+    assert values["DOCLING_SERVE_UPLOAD_STAGING_MODE"] == "required"
+    assert values["DOCLING_SERVE_ENG_KIND"] == "local"
+    assert values["DOCLING_SERVE_LEGACY_OFFICE_EXECUTABLE"] == "/usr/bin/soffice"
+    assert values["DOCLING_SERVE_ALLOW_DEFAULT_TENANT"] == "false"
+    assert values["DOCLING_SERVE_CORS_ORIGINS"] == "[]"
+    assert "DOCLING_SERVE_API_KEY" not in values
+
+
+def test_govcloud_runbook_tracks_existing_gitlab_production_inputs():
+    pipeline = Path(".gitlab-ci.yml").read_text()
+    runbook = Path("docs/govcloud-gpu-installation.md").read_text()
+    for name in (
+        "PRODUCTION_ACCOUNT_ID",
+        "PRODUCTION_INSTANCE_IDS",
+        "PRODUCTION_DOMAIN",
+        "PRODUCTION_ENV",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+    ):
+        assert name in pipeline
+        assert name in runbook
+    for behavior in (
+        "ansible-ssm-target-role",
+        "deploy-production",
+        "nvidia-smi",
+        "/ready/adapters",
+        "verify_post_deploy.py",
+    ):
+        assert behavior in pipeline
+        assert behavior in runbook

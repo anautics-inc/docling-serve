@@ -7,11 +7,13 @@ import re
 from pathlib import Path
 
 IMAGE_TOKEN = "DOCLING_SERVE_IMAGE_PLACEHOLDER"
+AWS_PARTITION_TOKEN = "DOCLING_AWS_PARTITION_PLACEHOLDER"
 STAGING_BUCKET_TOKEN = "DOCLING_STAGING_BUCKET_PLACEHOLDER"
 STAGING_REGION_TOKEN = "DOCLING_STAGING_REGION_PLACEHOLDER"
 STAGING_API_ROLE_ARN_TOKEN = "DOCLING_STAGING_API_ROLE_ARN_PLACEHOLDER"
 STAGING_WORKER_ROLE_ARN_TOKEN = "DOCLING_STAGING_WORKER_ROLE_ARN_PLACEHOLDER"
 STAGING_KMS_KEY_TOKEN = "DOCLING_STAGING_KMS_KEY_PLACEHOLDER"
+ASSERTION_KMS_KEY_TOKEN = "DOCLING_ASSERTION_KMS_KEY_PLACEHOLDER"
 _IMMUTABLE_IMAGE = re.compile(r"^[^\s@]+@sha256:([0-9a-f]{64})$")
 _BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _REGION = re.compile(r"^[a-z]{2}(?:-gov)?-[a-z]+-\d$")
@@ -41,17 +43,26 @@ def render_manifest(
     staging_api_role_arn: str | None = None,
     staging_worker_role_arn: str | None = None,
     staging_kms_key: str | None = None,
+    assertion_kms_key: str | None = None,
 ) -> str:
     rendered = template
     if IMAGE_TOKEN in rendered:
         validate_immutable_image(image)
         rendered = rendered.replace(IMAGE_TOKEN, image)
+    if AWS_PARTITION_TOKEN in rendered:
+        if staging_region is None or _REGION.fullmatch(staging_region) is None:
+            raise ValueError(
+                f"valid {STAGING_REGION_TOKEN} is required to render the AWS partition"
+            )
+        partition = "aws-us-gov" if staging_region.startswith("us-gov-") else "aws"
+        rendered = rendered.replace(AWS_PARTITION_TOKEN, partition)
     replacements = {
         STAGING_BUCKET_TOKEN: (staging_bucket, _BUCKET),
         STAGING_REGION_TOKEN: (staging_region, _REGION),
         STAGING_API_ROLE_ARN_TOKEN: (staging_api_role_arn, _ROLE_ARN),
         STAGING_WORKER_ROLE_ARN_TOKEN: (staging_worker_role_arn, _ROLE_ARN),
         STAGING_KMS_KEY_TOKEN: (staging_kms_key, _KMS_ARN),
+        ASSERTION_KMS_KEY_TOKEN: (assertion_kms_key, _KMS_ARN),
     }
     for token, (value, pattern) in replacements.items():
         if token not in rendered:
@@ -77,6 +88,7 @@ def main() -> None:
     parser.add_argument("--staging-api-role-arn")
     parser.add_argument("--staging-worker-role-arn")
     parser.add_argument("--staging-kms-key")
+    parser.add_argument("--assertion-kms-key")
     args = parser.parse_args()
     rendered = render_manifest(
         args.input.read_text(),
@@ -86,6 +98,7 @@ def main() -> None:
         staging_api_role_arn=args.staging_api_role_arn,
         staging_worker_role_arn=args.staging_worker_role_arn,
         staging_kms_key=args.staging_kms_key,
+        assertion_kms_key=args.assertion_kms_key,
     )
     args.output.write_text(rendered)
 

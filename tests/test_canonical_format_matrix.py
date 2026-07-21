@@ -155,6 +155,13 @@ def test_every_admitted_extension_produces_the_canonical_contract(
             outputContract=CAPABILITIES[context.decision.domain].output_contract,
         ),
     )
+    monkeypatch.setattr(
+        "docling_serve.form.extract_xfa_form",
+        lambda _path, *, source_key: {
+            "source": source_key,
+            "markdown": "# Golden form",
+        },
+    )
     task = Task(
         task_id=f"golden-{domain}-{extension[1:]}",
         task_type=TaskType.CHUNK,

@@ -93,9 +93,7 @@ def test_access_source_is_prepared_inside_canonical_task(
             "schema": "Items (id)",
             "tabular": {
                 "format": "captify.access/v1",
-                "tables": [
-                    {"name": "Items", "columns": ["id"], "rows": [{"id": "1"}]}
-                ],
+                "tables": [{"name": "Items", "columns": ["id"], "rows": [{"id": "1"}]}],
             },
         }
 

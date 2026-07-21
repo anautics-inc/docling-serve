@@ -388,6 +388,9 @@ testpaths = [
 addopts = "-rA --color=yes --tb=short --maxfail=5"
 markers = [
 "asyncio",
+"integration: requires a real distributed or container runtime",
+"gpu: requires production accelerator and model artifacts",
+"acceptance: requires deployed services or curated production samples",
 ]
 
 [tool.semantic_release]

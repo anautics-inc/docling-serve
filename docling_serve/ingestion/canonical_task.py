@@ -24,6 +24,13 @@ from docling_serve.ingestion.canonical_result import (
     CanonicalTypedMetadata,
     attach_canonical_result,
 )
+from docling_serve.ingestion.typed_domains import (
+    extract_access_domain,
+    extract_form_domain,
+    extract_schematic_domain,
+    extract_technical_order_domain,
+    public_form_payload,
+)
 
 CANONICAL_TASK_METADATA_KEY = "canonical_ingestion"
 
@@ -85,9 +92,8 @@ def prepare_canonical_task(task: Task) -> Iterator[CanonicalTaskContext | None]:
         source_metadata: dict[str, Any] | None = None
         prepared_stream: BytesIO | None = None
         if decision.domain == "access":
-            from docling_serve.access.extract import dump_schema, extract_access
-
-            markdown, tables, tabular_tables = extract_access(original_path)
+            access_payload = extract_access_domain(original_path, source_key=name)
+            markdown = str(access_payload["markdown"])
             prepared_stream = BytesIO(markdown.encode("utf-8"))
             worker_task = task.model_copy(
                 update={
@@ -100,18 +106,10 @@ def prepare_canonical_task(task: Task) -> Iterator[CanonicalTaskContext | None]:
                 }
             )
             source_metadata = {
-                "filename": name,
-                "tables": tables,
-                "schema": dump_schema(original_path),
-                "tabular": {
-                    "format": "captify.access/v1",
-                    "tables": tabular_tables,
-                },
+                key: value for key, value in access_payload.items() if key != "markdown"
             }
         elif decision.domain == "form":
-            from docling_serve.form import extract_xfa_form
-
-            form_payload = extract_xfa_form(original_path, source_key=name)
+            form_payload = extract_form_domain(original_path, source_key=name)
             markdown = str(form_payload.get("markdown") or "")
             prepared_stream = BytesIO(markdown.encode("utf-8"))
             worker_task = task.model_copy(
@@ -236,11 +234,13 @@ def _typed_metadata(
     with tempfile.TemporaryDirectory(prefix=f"canonical-{domain}-") as work:
         bundle = Path(work) / "bundle"
         if domain == "form":
-            from docling_serve.form import extract_xfa_form, read_xfa_packets
-
-            payload = extract_xfa_form(
-                context.original_path, source_key=context.original_name
+            service_payload = extract_form_domain(
+                context.original_path,
+                source_key=context.original_name,
+                include_packets=True,
             )
+            packets = service_payload.get("_packets") or {}
+            payload = public_form_payload(service_payload)
             summary = {
                 key: payload.get(key)
                 for key in ("fieldCount", "labelCount", "boundValueCount", "sections")
@@ -267,7 +267,6 @@ def _typed_metadata(
                     ),
                     encoding="utf-8",
                 )
-                packets = read_xfa_packets(context.original_path)
                 for packet_name in ("template", "datasets"):
                     if raw := packets.get(packet_name):
                         (bundle / f"xfa-{packet_name}.xml").write_bytes(raw)
@@ -294,9 +293,7 @@ def _typed_metadata(
                     encoding="utf-8",
                 )
         elif domain == "technical-order":
-            from docling_serve.technical_order.extract import extract_technical_order
-
-            payload = extract_technical_order(
+            payload = extract_technical_order_domain(
                 context.original_path,
                 source_key=context.original_name,
                 media_dir=bundle / "media" if bucket and prefix else None,
@@ -336,9 +333,7 @@ def _typed_metadata(
                     encoding="utf-8",
                 )
         else:
-            from docling_serve.schematic.extract import extract_schematic
-
-            payload = extract_schematic(
+            payload = extract_schematic_domain(
                 context.original_path,
                 bundle,
                 profile=str(config.get("profile") or "schematic"),

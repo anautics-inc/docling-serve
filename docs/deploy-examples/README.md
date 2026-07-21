@@ -71,8 +71,8 @@ period. Queue mutations use conditional S3 claim objects under
 from transitioning the same record, while expired claims are reclaimable after
 a crash. Readiness checks queue listing plus conditional claim/release.
 
-KMS encryption is preferred and required by these production examples. If an
-operator deliberately leaves `DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID` empty,
-the service uses S3-managed AES-256 encryption and readiness verifies it on the
-canary. `disabled` mode exposes URL-only conversion and returns 503 from every
-multipart file-upload endpoint; it is only for explicit local/test deployments.
+KMS encryption is required by production policy and these production examples.
+S3-managed AES-256 is accepted only by a non-production required-mode
+environment. `disabled` mode exposes URL-only conversion and returns 503 from
+every multipart file-upload endpoint; it is only for explicit local/test
+deployments.

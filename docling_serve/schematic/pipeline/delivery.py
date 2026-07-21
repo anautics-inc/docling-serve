@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from docling_serve.execution.subprocesses import run_external
 from docling_serve.schematic.pipeline.rendering import (
     export_kicad_svg,
     kicad_cli_available,
@@ -126,9 +126,7 @@ def check_kicad_opens(kicad_path: Path) -> CheckResult:
     with tempfile.TemporaryDirectory() as out:
         result = export_kicad_svg(kicad_path, out)
     if result.returncode != 0:
-        return CheckResult(
-            "kicad", "Opens in KiCad", "fail", result.stderr.strip()[:200]
-        )
+        return CheckResult("kicad", "Opens in KiCad", "fail", "KiCad render failed")
     return CheckResult("kicad", "Opens in KiCad", "pass", "KiCad plotted the schematic")
 
 
@@ -143,17 +141,14 @@ def check_kicad_erc(kicad_path: Path) -> CheckResult:
     ensure_kicad_cli_config()
     with tempfile.TemporaryDirectory() as out:
         report = Path(out) / "erc.rpt"
-        result = subprocess.run(
+        result = run_external(
             ["kicad-cli", "sch", "erc", "--output", str(report), str(kicad_path)],
-            capture_output=True,
             text=True,
             timeout=300,
         )
         text = report.read_text() if report.exists() else ""
     if result.returncode != 0 and not text:
-        return CheckResult(
-            "erc", "Electrical rule check", "fail", result.stderr.strip()[:200]
-        )
+        return CheckResult("erc", "Electrical rule check", "fail", "KiCad ERC failed")
     by_type: dict[str, int] = {}
     for match in re.finditer(r"\[([a-z_]+)\]", text):
         by_type[match.group(1)] = by_type.get(match.group(1), 0) + 1

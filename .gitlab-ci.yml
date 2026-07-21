@@ -137,6 +137,21 @@ build-image:
       docker run --rm -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
         "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
         python /opt/app-root/src/scripts/smoke_legacy_office_runtime.py
+      docker run --rm -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        python /opt/app-root/src/scripts/smoke_jackcess_runtime.py
+      docker run --rm -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        python -c "from docling_serve.ingestion.adapters import adapter_readiness_details; assert adapter_readiness_details()['access']['jackcess']"
+      if docker run --rm \
+        -e DOCLING_SERVE_DEPLOYMENT_MODE=production \
+        -e DOCLING_SERVE_AUTH_MODE=none \
+        -e DOCLING_SERVE_UPLOAD_STAGING_MODE=disabled \
+        "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG" \
+        python -c "from docling_serve.settings import DoclingServeSettings; DoclingServeSettings()"; then
+        echo "FATAL: production image accepted insecure authentication"
+        exit 1
+      fi
       docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
       echo "Image pushed to GitLab container registry."
     - |
@@ -202,11 +217,90 @@ unit-tests:
   variables:
     DOCLING_SERVE_ENABLE_UI: "false"
   script:
-    - uv run pytest tests/ -x -q --tb=short
+    - uv run pytest tests/ -q --tb=short
+    - PYTHONPATH=. uv run python scripts/build_architecture_graph.py
+    - PYTHONPATH=. uv run python scripts/check_architecture_graph.py
+    - uv run python scripts/check_path_coverage.py
   tags:
     - al2023-fips-shell
   rules:
     - when: always
+
+distributed-runtime-acceptance:
+  extends: .uv_bootstrap
+  stage: test
+  variables:
+    DOCLING_SERVE_ENABLE_UI: "false"
+  script:
+    - test -n "$DOCLING_SERVE_TEST_REDIS_URL"
+    - test -n "$DOCLING_SERVE_TEST_RAY_ADDRESS"
+    - uv run pytest -q tests/test_rq_live.py tests/test_execution_parity.py
+    - uv run pytest -q tests/test_ray_live.py
+  tags:
+    - al2023-fips-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $DOCLING_SERVE_TEST_REDIS_URL && $DOCLING_SERVE_TEST_RAY_ADDRESS'
+
+credentialed-staging-acceptance:
+  extends: .uv_bootstrap
+  stage: test
+  variables:
+    DOCLING_SERVE_RUN_LIVE_S3_STAGING: "1"
+  script:
+    - uv run pytest -q tests/test_upload_staging_live.py
+  tags:
+    - al2023-fips-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $DOCLING_SERVE_UPLOAD_STAGING_BUCKET'
+
+gpu-model-acceptance:
+  extends: .uv_bootstrap
+  stage: test
+  variables:
+    DOCLING_SERVE_RUN_MODEL_TESTS: "1"
+  script:
+    - nvidia-smi
+    - uv run pytest -q tests/test_gpu_live.py tests/test_fastapi_endpoints.py tests/test_file_opts.py tests/test_results_clear.py
+  tags:
+    - al2023-gpu-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+kicad-delivery-acceptance:
+  extends: .uv_bootstrap
+  stage: test
+  variables:
+    DOCLING_SERVE_RUN_KICAD_TESTS: "1"
+  script:
+    - command -v kicad-cli
+    - kicad-cli --version
+    - uv run pytest -q tests/test_kicad_live.py
+  tags:
+    - al2023-kicad-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+production-sample-acceptance:
+  extends: .uv_bootstrap
+  stage: test
+  script:
+    - test -n "$DOCLING_SERVE_PRODUCTION_SAMPLE_DIR"
+    - uv run python scripts/verify_production_samples.py --input "$DOCLING_SERVE_PRODUCTION_SAMPLE_DIR"
+  tags:
+    - al2023-gpu-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $DOCLING_SERVE_PRODUCTION_SAMPLE_DIR'
+
+post-deploy-acceptance:
+  extends: .uv_bootstrap
+  stage: deploy
+  script:
+    - test -n "$DOCLING_SERVE_ACCEPTANCE_URL"
+    - uv run python scripts/verify_post_deploy.py "$DOCLING_SERVE_ACCEPTANCE_URL"
+  tags:
+    - al2023-fips-shell
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule" && $DOCLING_SERVE_ACCEPTANCE_URL'
 
 # Override the GitLab dependency-scanning template job to enforce it always runs.
 # Note: dependency_scanning (underscore) is a configuration-only stub — the real
@@ -421,6 +515,12 @@ package-documents:
     - 'test -n "$AWS_ACCOUNT_ID" || (echo "FATAL: AWS_ACCOUNT_ID is not set" && exit 1)'
     - 'test -n "$DEPLOY_DOMAIN"  || (echo "FATAL: DEPLOY_DOMAIN is not set"  && exit 1)'
     - 'test -n "$ENV_FILE"       || (echo "FATAL: ENV_FILE is not set"       && exit 1)'
+    - 'grep -q "^DOCLING_SERVE_DEPLOYMENT_MODE=production$" "$ENV_FILE" || (echo "FATAL: production deployment mode is required" && exit 1)'
+    - 'grep -q "^DOCLING_SERVE_AUTH_MODE=assertion$" "$ENV_FILE" || (echo "FATAL: assertion authentication is required" && exit 1)'
+    - 'grep -q "^DOCLING_SERVE_UPLOAD_STAGING_MODE=required$" "$ENV_FILE" || (echo "FATAL: required upload staging is required" && exit 1)'
+    - "awk -F= '$1 == \"DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID\" && length($2) > 0 { found=1 } END { exit !found }' \"$ENV_FILE\" || (echo \"FATAL: KMS-encrypted upload staging is required\" && exit 1)"
+    - 'grep -q "^DOCLING_SERVE_ENG_KIND=" "$ENV_FILE" || (echo "FATAL: execution engine topology must be explicit" && exit 1)'
+    - 'grep -q "^DOCLING_SERVE_LEGACY_OFFICE_EXECUTABLE=/usr/bin/soffice$" "$ENV_FILE" || (echo "FATAL: container LibreOffice path must be explicit" && exit 1)'
 
     # ── ASSUME ROLE ───────────────────────────────────────────────────────────
     - echo "Assuming role in account $AWS_ACCOUNT_ID..."
@@ -516,6 +616,20 @@ package-documents:
         --volume /mnt/docling/scratch:/mnt/docling/scratch \
         --publish {{host_port}}:{{container_port}} \
         --detach "$IMAGE"
+
+      echo "Waiting for Docling Serve readiness..."
+      for attempt in $(seq 1 60); do
+        if curl --fail --silent "http://127.0.0.1:{{host_port}}/ready" >/dev/null; then
+          break
+        fi
+        if [ "$attempt" -eq 60 ]; then
+          docker logs --tail 200 docling-serve
+          echo "FATAL: Docling Serve did not become ready" >&2
+          exit 1
+        fi
+        sleep 5
+      done
+      curl --fail --silent "http://127.0.0.1:{{host_port}}/ready/adapters" >/dev/null
 
       echo "Removing stale images to prevent disk exhaustion..."
       docker images --format "{{.Repository}}:{{.Tag}}" \

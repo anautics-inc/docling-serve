@@ -7,7 +7,16 @@ from docling_serve.settings import DoclingServeSettings
 
 
 def _settings(**overrides) -> DoclingServeSettings:
-    return DoclingServeSettings(_env_file=None, **overrides)
+    hermetic = {
+        "bedrock_enabled": False,
+        "figure_hotspot_vision": False,
+        "vision_parts": False,
+        "technical_order_drawing_twin": False,
+        "graph_extraction_enabled": False,
+        "litellm_base_url": "",
+        "litellm_api_key": "",
+    }
+    return DoclingServeSettings(_env_file=None, **{**hermetic, **overrides})
 
 
 def test_secure_defaults_disable_remote_work_and_cross_origin_access():
@@ -57,3 +66,21 @@ def test_remote_features_accept_configured_transport():
         litellm_api_key="secret",
     )
     assert settings.graph_extraction_enabled is True
+
+
+def test_production_required_staging_requires_kms_encryption():
+    production = {
+        "deployment_mode": "production",
+        "auth_mode": "assertion",
+        "upload_staging_mode": "required",
+        "upload_staging_bucket": "staging-bucket",
+        "upload_staging_region": "us-gov-west-1",
+    }
+    with pytest.raises(ValidationError, match="upload_staging_kms_key_id"):
+        _settings(**production, upload_staging_kms_key_id="")
+
+    settings = _settings(
+        **production,
+        upload_staging_kms_key_id="alias/docling-production-staging",
+    )
+    assert settings.upload_staging_kms_key_id == "alias/docling-production-staging"

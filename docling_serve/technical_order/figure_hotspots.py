@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import re
 import struct
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from docling_serve.execution.subprocesses import ExternalCommandError, run_external
 from docling_serve.technical_order.contract import provenance
 from docling_serve.technical_order.mpl import FigureRecord, PartsListEntry
 
@@ -113,7 +113,7 @@ def render_figure_png(
     """
     out_stem.parent.mkdir(parents=True, exist_ok=True)
     try:
-        subprocess.run(
+        run_external(
             [
                 "pdftoppm",
                 "-png",
@@ -127,15 +127,10 @@ def render_figure_png(
                 str(pdf_path),
                 str(out_stem),
             ],
-            capture_output=True,
             check=True,
             timeout=120,
         )
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-    ):
+    except ExternalCommandError:
         return None
     png = out_stem.with_suffix(".png")
     return png if png.is_file() else None
@@ -152,7 +147,7 @@ def render_figure_svg(pdf_path: Path, page_number: int, out_stem: Path) -> Path 
     out_stem.parent.mkdir(parents=True, exist_ok=True)
     svg = out_stem.with_suffix(".svg")
     try:
-        subprocess.run(
+        run_external(
             [
                 "pdftocairo",
                 "-svg",
@@ -163,15 +158,10 @@ def render_figure_svg(pdf_path: Path, page_number: int, out_stem: Path) -> Path 
                 str(pdf_path),
                 str(svg),
             ],
-            capture_output=True,
             check=True,
             timeout=120,
         )
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-    ):
+    except ExternalCommandError:
         return None
     return svg if svg.is_file() else None
 
@@ -185,17 +175,12 @@ def _tesseract_tokens(
     filter, and a whitelist measurably hurt tesseract 4.x segmentation here.
     """
     try:
-        out = subprocess.run(
+        out = run_external(
             ["tesseract", str(png_path), "-", "--psm", str(psm), "tsv"],
-            capture_output=True,
             check=True,
             timeout=120,
         )
-    except (
-        subprocess.CalledProcessError,
-        subprocess.TimeoutExpired,
-        FileNotFoundError,
-    ):
+    except ExternalCommandError:
         return []
     rows: list[tuple[str, float, int, int, int, int]] = []
     for line in out.stdout.decode("utf-8", errors="replace").splitlines()[1:]:

@@ -75,7 +75,7 @@ THe following table describes the options to configure the Docling Serve app.
 |  | `DOCLING_SERVE_UPLOAD_STAGING_DEAD_LETTER_RETENTION_DAYS` | `30` | Exact finite maximum retention for encrypted permanent-failure audit records. |
 |  | `DOCLING_SERVE_UPLOAD_STAGING_CLAIM_RETENTION_DAYS` | `1` | Lifecycle backstop for abandoned reconciliation claim objects. |
 |  | `DOCLING_SERVE_UPLOAD_STAGING_CLAIM_LEASE_SECONDS` | `60` | ETag-fenced distributed claim lease duration for competing reconcilers. |
-|  | `DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID` | empty | Preferred KMS key ARN. When empty, objects use and readiness verifies SSE-S3 (`AES256`). |
+|  | `DOCLING_SERVE_UPLOAD_STAGING_KMS_KEY_ID` | empty | KMS key ARN. Mandatory when `deployment_mode=production` and staging is required; non-production required-mode environments may omit it and verify SSE-S3 (`AES256`). |
 |  | `DOCLING_SERVE_UPLOAD_STAGING_MAX_FILE_SIZE` | `1073741824` | Independent hard upper bound for staged PUT/HEAD/streamed GET validation. |
 |  | `DOCLING_SERVE_UPLOAD_STAGING_IO_TIMEOUT_SECONDS` | `30` | SDK connect/read timeout for staging operations. |
 |  | `DOCLING_SERVE_UPLOAD_STAGING_PROBE_CACHE_SECONDS` | `30` | Short readiness capability-probe cache. Every RQ worker and Ray converter replica still forces a boot probe. |

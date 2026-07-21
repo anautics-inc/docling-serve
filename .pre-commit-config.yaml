@@ -30,13 +30,6 @@ repos:
         pass_filenames: false
         # Fail the commit if documentation generation fails
         require_serial: true
-  - repo: https://github.com/errata-ai/vale
-    rev: v3.15.1
-    hooks:
-      - id: vale
-        name: vale sync
-        pass_filenames: false
-        args: [sync, "--config=.github/vale.ini"]
   - repo: https://github.com/astral-sh/uv-pre-commit
     # uv version, https://github.com/astral-sh/uv-pre-commit/releases
     rev: 0.11.29

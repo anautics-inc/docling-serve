@@ -15,6 +15,7 @@ ARG CYCLONEDX_BOM_VERSION
 ENV UV_PROJECT_ENVIRONMENT=/opt/app-root
 WORKDIR /opt/app-root/src
 COPY pyproject.toml uv.lock ./
+COPY scripts/enrich_sbom.py ./scripts/enrich_sbom.py
 RUN --mount=from=uv-stage,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
     uv sync --frozen --all-extras --no-install-project \
@@ -26,7 +27,8 @@ RUN mkdir -p /opt/app-root/src/out && \
         --spec-version 1.6 \
         --output-format JSON \
         --output-reproducible \
-        --output-file /opt/app-root/src/out/build-sbom.json
+        --output-file /opt/app-root/src/out/build-sbom.json && \
+    /opt/app-root/bin/python scripts/enrich_sbom.py /opt/app-root/src/out/build-sbom.json
 
 FROM ${BASE_IMAGE} AS runtime-sbom
 
@@ -34,6 +36,7 @@ ARG CYCLONEDX_BOM_VERSION
 ENV UV_PROJECT_ENVIRONMENT=/opt/app-root
 WORKDIR /opt/app-root/src
 COPY pyproject.toml uv.lock ./
+COPY scripts/enrich_sbom.py ./scripts/enrich_sbom.py
 RUN --mount=from=uv-stage,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
     uv sync --frozen --no-dev --all-extras --no-install-project \
@@ -45,7 +48,8 @@ RUN mkdir -p /opt/app-root/src/out && \
         --spec-version 1.6 \
         --output-format JSON \
         --output-reproducible \
-        --output-file /opt/app-root/src/out/runtime-sbom.json
+        --output-file /opt/app-root/src/out/runtime-sbom.json && \
+    /opt/app-root/bin/python scripts/enrich_sbom.py /opt/app-root/src/out/runtime-sbom.json
 
 FROM ${BASE_IMAGE} AS sbom-output
 

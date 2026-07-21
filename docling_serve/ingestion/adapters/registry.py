@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ def _legacy_office_ready() -> bool:
 
 
 def _access_ready() -> bool:
-    return _imports("access_parser", "docling_serve.access.extract")
+    return bool(_access_readiness()["available"])
 
 
 def _form_ready() -> bool:
@@ -45,10 +46,7 @@ def _technical_order_ready() -> bool:
 
 
 def _schematic_ready() -> bool:
-    return _imports(
-        "docling_serve.schematic.extract",
-        "docling_serve.schematic.schematic_extractor",
-    ) and _executables("pdftocairo")
+    return bool(_schematic_readiness()["core"])
 
 
 def _imports(*modules: str) -> bool:
@@ -156,6 +154,36 @@ async def execute_adapter(
 
 def adapter_readiness() -> dict[str, bool]:
     return {domain: adapter.readiness() for domain, adapter in ADAPTERS.items()}
+
+
+def _access_readiness() -> dict[str, bool]:
+    parser = _imports("access_parser", "docling_serve.access.extract")
+    jackcess = bool(os.getenv("DOCLING_SERVE_JACKCESS_CLASSPATH", "").strip()) and (
+        _executables("java", "javac")
+    )
+    return {
+        "available": parser or jackcess,
+        "access_parser": parser,
+        "jackcess": jackcess,
+    }
+
+
+def _schematic_readiness() -> dict[str, bool]:
+    core = _imports(
+        "docling_serve.schematic.extract",
+        "docling_serve.schematic.schematic_extractor",
+    ) and _executables("pdftocairo")
+    kicad = _executables("kicad-cli")
+    return {"core": core, "kicad_export": kicad, "kicad_erc": kicad}
+
+
+def adapter_readiness_details() -> dict[str, dict[str, bool]]:
+    """Expose optional runtime components without marking core extraction down."""
+
+    return {
+        "access": _access_readiness(),
+        "schematic": _schematic_readiness(),
+    }
 
 
 def public_capabilities() -> list[dict[str, object]]:

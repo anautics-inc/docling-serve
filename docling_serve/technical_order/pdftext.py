@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from docling_serve.execution.subprocesses import run_external
 
 _OCR_RENDER_DPI = 300
 _OCR_WORKERS = 4
@@ -39,7 +40,7 @@ def page_layout_texts(
     if last is not None:
         cmd += ["-l", str(last)]
     cmd += [str(pdf_path), "-"]
-    out = subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+    out = run_external(cmd, check=True, timeout=120)
     text = out.stdout.decode("utf-8", errors="replace")
     pages = text.split("\f")
     if pages and pages[-1].strip() == "":
@@ -63,16 +64,15 @@ def ocr_page_texts(pdf_path: Path, *, dpi: int = _OCR_RENDER_DPI) -> list[str]:
     """
     with tempfile.TemporaryDirectory(prefix="to-ocr-") as td:
         tmp = Path(td)
-        subprocess.run(
+        run_external(
             ["pdftoppm", "-gray", "-r", str(dpi), str(pdf_path), str(tmp / "pg")],
-            capture_output=True,
             check=True,
             timeout=1800,
         )
         images = sorted(tmp.glob("pg-*.pgm"))
 
         def ocr_one(image: Path) -> str:
-            out = subprocess.run(
+            out = run_external(
                 [
                     "tesseract",
                     str(image),
@@ -82,7 +82,6 @@ def ocr_page_texts(pdf_path: Path, *, dpi: int = _OCR_RENDER_DPI) -> list[str]:
                     "-c",
                     "preserve_interword_spaces=1",
                 ],
-                capture_output=True,
                 timeout=300,
             )
             text = out.stdout.decode("utf-8", errors="replace")

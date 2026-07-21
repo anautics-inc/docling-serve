@@ -13,3 +13,4 @@ libreoffice-calc
 libreoffice-impress
 libreoffice-writer
 util-linux
+java-17-openjdk-devel

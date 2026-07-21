@@ -13,6 +13,7 @@ ARG MIMALLOC_COMMIT=927e97f0df3225710fa724104bba29d3d9037e71
 # the final image — no ngspice CLI, no EPEL.
 ARG NGSPICE_VERSION=46
 ARG NGSPICE_SHA256=a0d1699af1940b06649276dcd6ff5a566c8c0cad01b2f7b5e99dedbb4d64c19b
+ARG JACKCESS_VERSION=5.1.4
 
 
 ###################################################################################################
@@ -71,6 +72,23 @@ RUN ./configure --with-ngshared --disable-debug --without-x \
     make install
 
 
+FROM ${BASE_IMAGE} AS jackcess
+
+ARG JACKCESS_VERSION
+USER 0
+RUN dnf install -y --best --nodocs --setopt=install_weak_deps=False maven && \
+    mvn -q -Dmaven.repo.local=/tmp/m2 dependency:get -Dartifact=io.github.spannm:jackcess:${JACKCESS_VERSION} && \
+    mkdir -p /opt/jackcess && \
+    cp /tmp/m2/io/github/spannm/jackcess/${JACKCESS_VERSION}/jackcess-${JACKCESS_VERSION}.jar /opt/jackcess/ && \
+    cp /tmp/m2/org/apache/poi/poi/*/poi-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/commons-codec/commons-codec/*/commons-codec-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/org/apache/commons/commons-collections4/*/commons-collections4-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/org/apache/commons/commons-math3/*/commons-math3-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/commons-io/commons-io/*/commons-io-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/com/zaxxer/SparseBitSet/*/SparseBitSet-*.jar /opt/jackcess/ && \
+    cp /tmp/m2/org/apache/logging/log4j/log4j-api/*/log4j-api-*.jar /opt/jackcess/
+
+
 FROM ${BASE_IMAGE} AS docling-base
 
 ###################################################################################################
@@ -99,6 +117,7 @@ COPY --from=mimalloc /opt/app-root/src/mimalloc/out/release/libmimalloc.so /usr/
 # libngspice (+ its versioned symlinks) for PySpice's NgSpiceShared binding.
 # Register /usr/local/lib so the dynamic loader (and ctypes find_library) resolve it.
 COPY --from=ngspice /usr/local/lib/libngspice.so* /usr/local/lib/
+COPY --from=jackcess /opt/jackcess /opt/jackcess
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/local-lib.conf && ldconfig
 
 RUN /usr/bin/fix-permissions /opt/app-root/src/.cache
@@ -125,6 +144,7 @@ ENV \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/app-root \
+    DOCLING_SERVE_JACKCESS_CLASSPATH=/opt/jackcess/* \
     DOCLING_SERVE_ARTIFACTS_PATH=/opt/app-root/src/.cache/docling/models \
     HF_HOME=/opt/app-root/src/.cache/huggingface
 
@@ -178,6 +198,8 @@ USER 1001
 
 COPY --chown=1001:0 ./docling_serve ./docling_serve
 COPY --chown=1001:0 ./scripts/smoke_legacy_office_runtime.py ./scripts/smoke_legacy_office_runtime.py
+COPY --chown=1001:0 ./scripts/smoke_jackcess_runtime.py ./scripts/smoke_jackcess_runtime.py
+COPY --chown=1001:0 ./production.yaml ./production.yaml
 
 RUN --mount=from=uv_stage,source=/uv,target=/bin/uv \
     --mount=type=cache,target=/opt/app-root/src/.cache/uv,uid=1001 \
@@ -201,7 +223,7 @@ ENV \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_DATASETS_OFFLINE=1 \
-    DOCLING_SERVE_UPLOAD_STAGING_MODE=required
+    DOCLING_SERVE_CONFIG_FILE=/opt/app-root/src/production.yaml
 
 EXPOSE 5001
 

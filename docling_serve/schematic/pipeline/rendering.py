@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from docling_serve.execution.subprocesses import run_external
 from docling_serve.schematic.kicad_sch import (
     component_annotation_sexprs,
     inject_items,
@@ -94,6 +95,25 @@ def kicad_cli_available() -> bool:
     return shutil.which("kicad-cli") is not None
 
 
+def export_pdf_svg(pdf_path: Path, page_number: int, target: Path):
+    """Render one PDF page through the shared subprocess policy."""
+
+    return run_external(
+        [
+            "pdftocairo",
+            "-svg",
+            "-f",
+            str(page_number),
+            "-l",
+            str(page_number),
+            str(pdf_path),
+            str(target),
+        ],
+        check=True,
+        timeout=120,
+    )
+
+
 def export_kicad_svg(
     kicad_path: Path, output_dir: str | Path, *, no_background_color: bool = False
 ) -> subprocess.CompletedProcess[str]:
@@ -102,9 +122,8 @@ def export_kicad_svg(
     command = ["kicad-cli", "sch", "export", "svg"]
     if no_background_color:
         command.append("--no-background-color")
-    return subprocess.run(
+    return run_external(
         [*command, "--output", str(output_dir), str(kicad_path)],
-        capture_output=True,
         text=True,
         timeout=300,
     )

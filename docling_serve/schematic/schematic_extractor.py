@@ -28,7 +28,6 @@ import io
 import logging
 import math
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +55,7 @@ from docling_serve.schematic.label_verify import verify_component_labels
 from docling_serve.schematic.net_trace import ComponentBox, Pt, TracedNet, trace_nets
 from docling_serve.schematic.netlist import graph_to_kicad_netlist
 from docling_serve.schematic.pipeline.rendering import (
+    export_pdf_svg,
     inject_net_wires,
     render_kicad_previews,
 )
@@ -935,28 +935,10 @@ def _render_svgs(pdf_path: Path, out_dir: Path, *, max_pages: int) -> list[Path]
             "schematic.svg" if page_count == 1 else f"schematic-page-{page_no:03d}.svg"
         )
         try:
-            subprocess.run(
-                [
-                    "pdftocairo",
-                    "-svg",
-                    "-f",
-                    str(page_no),
-                    "-l",
-                    str(page_no),
-                    str(pdf_path),
-                    str(target),
-                ],
-                check=True,
-                capture_output=True,
-                timeout=120,
-            )
+            export_pdf_svg(pdf_path, page_no, target)
             if target.is_file():
                 written.append(target)
-        except FileNotFoundError as err:
-            # pdftocairo is not installed — no point trying further pages.
-            _log.warning("pdftocairo unavailable for %s: %s", pdf_path, err)
-            break
-        except subprocess.SubprocessError as err:
+        except RuntimeError as err:
             # One bad page must not drop geometry for the rest of the drawing set.
             _log.warning(
                 "pdftocairo SVG export failed for %s p%s: %s", pdf_path, page_no, err

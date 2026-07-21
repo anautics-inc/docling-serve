@@ -30,6 +30,27 @@ jobs:
       - name: Run styling check
         run: uv run pre-commit run --all-files
 
+  hermetic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras --no-extra flash-attn
+      - name: Run the complete hermetic suite
+        env:
+          DOCLING_SERVE_ENABLE_UI: "false"
+        run: uv run pytest tests/ -q --tb=short
+      - name: Verify architecture provenance and path coverage
+        run: |
+          PYTHONPATH=. uv run python scripts/build_architecture_graph.py
+          PYTHONPATH=. uv run python scripts/check_architecture_graph.py
+          uv run python scripts/check_path_coverage.py
+
   build-package:
     uses: ./.github/workflows/job-build.yml
 

@@ -8,12 +8,20 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from scripts.architecture_evidence import (
-    GRAPHIFY_VERSION,
-    installed_graphify_version,
-    materialize_snapshot,
-    write_json,
-)
+try:
+    from scripts.architecture_evidence import (
+        GRAPHIFY_VERSION,
+        installed_graphify_version,
+        materialize_snapshot,
+        write_json,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/...`` invocation
+    from architecture_evidence import (  # type: ignore[no-redef]
+        GRAPHIFY_VERSION,
+        installed_graphify_version,
+        materialize_snapshot,
+        write_json,
+    )
 
 
 def main() -> int:

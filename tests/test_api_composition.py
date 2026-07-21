@@ -1,3 +1,6 @@
+import httpx
+import pytest
+
 from docling_serve.app import create_app
 
 
@@ -67,3 +70,25 @@ def test_dynamic_chunk_routes_keep_distinct_operation_names(monkeypatch):
         schema["paths"]["/v1/chunk/hierarchical/source"]["post"]["summary"]
         == "Chunk Sources With Hierarchicalchunker"
     )
+
+
+@pytest.mark.asyncio
+async def test_every_public_route_is_bound_to_an_asgi_handler(monkeypatch):
+    monkeypatch.setattr(
+        "docling_serve.app.setup_otel_instrumentation", lambda *args, **kwargs: None
+    )
+    app = create_app()
+    schema = app.openapi()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://docling.test"
+    ) as client:
+        for path, operations in schema["paths"].items():
+            concrete_path = path.replace("{task_id}", "missing-task")
+            for method in operations:
+                response = await client.request(method, concrete_path)
+                assert response.status_code not in {404, 405, 500}, (
+                    method,
+                    path,
+                    response.text,
+                )

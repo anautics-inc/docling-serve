@@ -1,0 +1,11 @@
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+dist/
+graphify-out/
+model_artifacts/
+offline-packages/
+scratch/
+*.log

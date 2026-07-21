@@ -15,6 +15,14 @@ from docling_serve.technical_order.schematic_figures import (
 )
 
 DEFAULT_INPUT = Path(__file__).resolve().parents[1] / "docs" / "tests"
+DEFAULT_THRESHOLDS = {
+    "minimum_total_entries": 1,
+    "minimum_total_figures": 1,
+    "minimum_rendered_ratio": 1.0,
+    "minimum_schematic_samples": 1,
+    "minimum_schematic_components": 1,
+    "minimum_schematic_nets": 1,
+}
 
 
 def safe_name(value: str) -> str:
@@ -76,17 +84,58 @@ def verify(pdf_path: Path, output_root: Path) -> dict:
     return summary
 
 
+def validate_summaries(
+    summaries: list[dict],
+    thresholds: dict[str, int | float],
+) -> None:
+    total_figures = sum(int(item["figureCount"]) for item in summaries)
+    rendered_figures = sum(int(item["renderedFigures"]) for item in summaries)
+    schematic_samples = [
+        item
+        for item in summaries
+        if int(item["schematicComponents"]) > 0 or int(item["schematicNets"]) > 0
+    ]
+    observed = {
+        "minimum_total_entries": sum(int(item["entryCount"]) for item in summaries),
+        "minimum_total_figures": total_figures,
+        "minimum_rendered_ratio": (
+            rendered_figures / total_figures if total_figures else 0.0
+        ),
+        "minimum_schematic_samples": len(schematic_samples),
+        "minimum_schematic_components": sum(
+            int(item["schematicComponents"]) for item in summaries
+        ),
+        "minimum_schematic_nets": sum(int(item["schematicNets"]) for item in summaries),
+    }
+    failures = [
+        f"{name}={observed[name]} is below {minimum}"
+        for name, minimum in thresholds.items()
+        if name not in observed or observed[name] < minimum
+    ]
+    if failures:
+        raise RuntimeError("Production sample regression: " + "; ".join(failures))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument(
         "--output", type=Path, default=Path("/tmp/production-extraction")
     )
+    parser.add_argument(
+        "--thresholds",
+        type=Path,
+        help="Optional JSON overrides for production regression thresholds.",
+    )
     args = parser.parse_args()
     samples = sorted(args.input.glob("*.pdf"))
     if len(samples) != 3:
         raise SystemExit(f"expected 3 PDF samples, found {len(samples)}")
     summaries = [verify(sample, args.output) for sample in samples]
+    thresholds = dict(DEFAULT_THRESHOLDS)
+    if args.thresholds:
+        thresholds.update(json.loads(args.thresholds.read_text(encoding="utf-8")))
+    validate_summaries(summaries, thresholds)
     print(json.dumps(summaries, indent=2))
 
 

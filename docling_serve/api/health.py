@@ -10,10 +10,17 @@ from fastapi.responses import PlainTextResponse
 from docling.datamodel.service.responses import HealthCheckResponse, ReadinessResponse
 
 from docling_serve.api.deps import ApiDependencies
-from docling_serve.ingestion.adapters import adapter_readiness, public_capabilities
+from docling_serve.ingestion.adapters import (
+    adapter_readiness,
+    adapter_readiness_details,
+    public_capabilities,
+)
 from docling_serve.otel_instrumentation import get_metrics_endpoint_content
 
 _log = logging.getLogger(__name__)
+OPTIONAL_FEATURES = {
+    "image_context": False,
+}
 
 
 def create_health_router(deps: ApiDependencies) -> APIRouter:
@@ -34,9 +41,13 @@ def create_health_router(deps: ApiDependencies) -> APIRouter:
         return await readiness()
 
     @router.get("/ready/adapters", tags=["health"])
-    async def adapters() -> dict[str, dict[str, bool]]:
+    async def adapters() -> dict[str, object]:
         await deps.assert_ready()
-        return {"adapters": adapter_readiness()}
+        return {
+            "adapters": adapter_readiness(),
+            "details": adapter_readiness_details(),
+            "features": OPTIONAL_FEATURES,
+        }
 
     @router.get("/v1/capabilities", tags=["health"])
     async def capabilities() -> dict[str, list[dict[str, object]]]:

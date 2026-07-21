@@ -13,10 +13,11 @@ tesseract-sourced parses have no PDF coordinates and are skipped.
 from __future__ import annotations
 
 import re
-import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+
+from docling_serve.execution.subprocesses import ExternalCommandError, run_external
 
 _XHTML_NS = "{http://www.w3.org/1999/xhtml}"
 _WS = re.compile(r"\s+")
@@ -44,9 +45,8 @@ class PageLines:
 
 def page_line_boxes(pdf_path: Path) -> dict[int, PageLines]:
     """Per-page text lines with PDF-space bounding boxes (1-based pages)."""
-    out = subprocess.run(
+    out = run_external(
         ["pdftotext", "-bbox-layout", str(pdf_path), "-"],
-        capture_output=True,
         check=True,
         timeout=300,
     )
@@ -98,7 +98,7 @@ def attach_row_boxes(entries, pdf_path: Path) -> int:
         return 0
     try:
         pages = page_line_boxes(pdf_path)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ET.ParseError):
+    except (ExternalCommandError, ET.ParseError):
         return 0
 
     matched = 0

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "default_tier": "merge-hermetic",
+  "tiers": {
+    "merge-hermetic": {
+      "description": "Deterministic unit, contract, ASGI, architecture, lint, and type gates."
+    },
+    "container-integration": {
+      "description": "Real packaged image with required subprocesses and offline dependencies."
+    },
+    "distributed-integration": {
+      "description": "Redis/RQ or Ray runtime with queue, retry, telemetry, and cleanup behavior."
+    },
+    "credentialed-staging": {
+      "description": "Tenant-scoped external services including S3, KMS, Bedrock, and LiteLLM."
+    },
+    "gpu-model": {
+      "description": "Real Docling and vision models on the production accelerator image."
+    },
+    "periodic-acceptance": {
+      "description": "Operator tools, UIs, backfills, and curated production samples."
+    }
+  },
+  "classifications": [
+    {
+      "tier": "container-integration",
+      "patterns": [
+        "docling_serve/access/**",
+        "docling_serve/legacy/**",
+        "docling_serve/legacy_office.py",
+        "docling_serve/legacy_office.pyi",
+        "docling_serve/technical_order/pdftext.py",
+        "docling_serve/schematic/pipeline/rendering.py",
+        "docling_serve/staging_smoke.py",
+        "deploy/**",
+        "Containerfile*",
+        "scripts/*legacy-office*"
+      ]
+    },
+    {
+      "tier": "distributed-integration",
+      "patterns": [
+        "docling_serve/local_orchestrator.py",
+        "docling_serve/orchestrator_factory.py",
+        "docling_serve/ray_legacy.py",
+        "docling_serve/ray_metrics_collector.py",
+        "docling_serve/rq_*.py",
+        "docling_serve/websocket_notifier.py"
+      ]
+    },
+    {
+      "tier": "credentialed-staging",
+      "patterns": [
+        "docling_serve/artifacts/**",
+        "docling_serve/graph/extraction.py",
+        "docling_serve/providers/bedrock.py",
+        "docling_serve/staging/**",
+        "docling_serve/upload_staging.py",
+        "docling_serve/upload_staging.pyi",
+        "scripts/configure_upload_staging.py"
+      ]
+    },
+    {
+      "tier": "gpu-model",
+      "patterns": [
+        "docling_serve/schematic/schematic_extractor.py",
+        "docling_serve/technical_order/vision_parts.py",
+        "scripts/verify_production_samples.py"
+      ]
+    },
+    {
+      "tier": "periodic-acceptance",
+      "patterns": [
+        "docling_serve/gradio_ui.py",
+        "docling_serve/schematic/schematic_eval.py",
+        "docling_serve/technical_order/viewer.py",
+        "docling_serve/tools/**",
+        "scripts/backfill_bundle_content_types.py",
+        "scripts/update_doc_usage.py",
+        "scripts/verify_post_deploy.py"
+      ]
+    }
+  ],
+  "surfaces": {
+    "production_modules": "docling_serve/**/*.py",
+    "scripts": "scripts/*",
+    "deployment": [
+      "Containerfile",
+      "Containerfile.sbom",
+      "production.yaml",
+      "deploy/**/*",
+      "docs/deploy-examples/**/*"
+    ]
+  },
+  "required_route_test": "tests/test_api_composition.py",
+  "required_entrypoint_tests": [
+    "tests/test_execution_parity.py",
+    "tests/test_operational_entrypoints.py"
+  ]
+}

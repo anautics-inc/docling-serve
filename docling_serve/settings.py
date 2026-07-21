@@ -733,6 +733,10 @@ class DoclingServeSettings(BaseSettings):
             "upload_staging_bucket": self.upload_staging_bucket,
             "upload_staging_region": self.upload_staging_region,
         }
+        if self.deployment_mode == "production":
+            required_staging["upload_staging_kms_key_id"] = (
+                self.upload_staging_kms_key_id
+            )
         missing = [name for name, value in required_staging.items() if not value]
         if missing:
             raise ValueError(

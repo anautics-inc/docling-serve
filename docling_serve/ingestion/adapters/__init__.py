@@ -3,6 +3,7 @@
 from docling_serve.ingestion.adapters.registry import (
     ADAPTERS,
     adapter_readiness,
+    adapter_readiness_details,
     execute_adapter,
     get_adapter,
     public_capabilities,
@@ -11,6 +12,7 @@ from docling_serve.ingestion.adapters.registry import (
 __all__ = [
     "ADAPTERS",
     "adapter_readiness",
+    "adapter_readiness_details",
     "execute_adapter",
     "get_adapter",
     "public_capabilities",

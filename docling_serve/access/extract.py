@@ -16,10 +16,11 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from docling_serve.execution.subprocesses import run_external
 
 _log = logging.getLogger(__name__)
 
@@ -100,7 +101,9 @@ def extract_access(
     try:
         db = _load(path)
     except Exception as error:
-        _log.warning("access-parser could not open %s; trying Jackcess: %s", path, error)
+        _log.warning(
+            "access-parser could not open %s; trying Jackcess: %s", path, error
+        )
         return _jackcess_extract(path)
     parts: list[str] = [f"# {path.stem}", ""]
     summaries: list[dict[str, int | str]] = []
@@ -142,17 +145,22 @@ def _jackcess_extract(
         )
     source = Path(__file__).with_name("JackcessDump.java")
     with tempfile.TemporaryDirectory(prefix="captify-jackcess-") as classes:
-        subprocess.run(
+        run_external(
             ["javac", "-cp", classpath, "-d", classes, str(source)],
             check=True,
-            capture_output=True,
             text=True,
             timeout=60,
         )
-        completed = subprocess.run(
-            ["java", "-cp", f"{classpath}:{classes}", "JackcessDump", str(path), "10000"],
+        completed = run_external(
+            [
+                "java",
+                "-cp",
+                f"{classpath}:{classes}",
+                "JackcessDump",
+                str(path),
+                "10000",
+            ],
             check=True,
-            capture_output=True,
             text=True,
             timeout=300,
         )

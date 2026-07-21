@@ -1,0 +1,4 @@
+deployment_mode: production
+auth_mode: assertion
+upload_staging_mode: required
+legacy_office_executable: /usr/bin/soffice

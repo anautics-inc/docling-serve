@@ -9,14 +9,24 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from scripts.architecture_evidence import (
-    CORE_PREFIX,
-    DEPENDENCY_RELATIONS,
-    GRAPHIFY_VERSION,
-    SCHEMA_VERSION,
-    SNAPSHOT_ALGORITHM,
-    source_snapshot,
-)
+try:
+    from scripts.architecture_evidence import (
+        CORE_PREFIX,
+        DEPENDENCY_RELATIONS,
+        GRAPHIFY_VERSION,
+        SCHEMA_VERSION,
+        SNAPSHOT_ALGORITHM,
+        source_snapshot,
+    )
+except ModuleNotFoundError:  # direct ``python scripts/...`` invocation
+    from architecture_evidence import (  # type: ignore[no-redef]
+        CORE_PREFIX,
+        DEPENDENCY_RELATIONS,
+        GRAPHIFY_VERSION,
+        SCHEMA_VERSION,
+        SNAPSHOT_ALGORITHM,
+        source_snapshot,
+    )
 
 RATCHETS = (
     "largest_file_scc",

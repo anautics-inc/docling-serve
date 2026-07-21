@@ -79,13 +79,24 @@ async def test_adapter_readiness_reports_runtime_probes(client: AsyncClient):
         "technical-order": True,
         "access": False,
     }
-    with patch(
-        "docling_serve.api.health.adapter_readiness",
-        return_value=expected,
+    details = {"access": {"jackcess": False}}
+    with (
+        patch(
+            "docling_serve.api.health.adapter_readiness",
+            return_value=expected,
+        ),
+        patch(
+            "docling_serve.api.health.adapter_readiness_details",
+            return_value=details,
+        ),
     ):
         response = await client.get("/ready/adapters")
     assert response.status_code == 200
-    assert response.json() == {"adapters": expected}
+    assert response.json() == {
+        "adapters": expected,
+        "details": details,
+        "features": {"image_context": False},
+    }
 
 
 @pytest.mark.asyncio

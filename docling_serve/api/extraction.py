@@ -26,6 +26,13 @@ from docling_serve.graph import (
     graph_payload_from_text,
     resolve_profile_template,
 )
+from docling_serve.ingestion.typed_domains import (
+    extract_access_domain,
+    extract_form_domain,
+    extract_schematic_domain,
+    extract_technical_order_domain,
+    public_form_payload,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -151,10 +158,8 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
         """
         from docling_serve.access import (
             AccessToolsUnavailableError,
-            access_to_markdown,
             is_access_file,
         )
-        from docling_serve.access.extract import dump_schema
 
         tenant_id = deps.get_tenant_id(x_tenant_id)
         if not files:
@@ -172,25 +177,17 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
                 domain="access",
                 fallback_name="database.mdb",
             ) as admitted:
-                markdown, tables = access_to_markdown(admitted.path)
-                schema = dump_schema(admitted.path)
+                payload = extract_access_domain(admitted.path, source_key=name)
         except AccessToolsUnavailableError as err:
             raise HTTPException(status_code=503, detail=str(err)) from err
-        return {
-            "filename": name,
-            "markdown": markdown,
-            "tables": tables,
-            "schema": schema,
-        }
+        return payload
 
     async def execute_form(
         upload: UploadFile, name: str, tenant_id: str, prefix: str, bucket: str
     ) -> dict[str, Any]:
         from docling_serve.form import (
             XfaToolsUnavailableError,
-            extract_xfa_form,
             is_xfa_pdf,
-            read_xfa_packets,
         )
 
         if not name.lower().endswith(".pdf"):
@@ -207,8 +204,11 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
                         status_code=422,
                         detail="This PDF carries no XFA form (not an AF/LiveCycle dynamic form).",
                     )
-                payload = extract_xfa_form(src, source_key=name)
-                packets = read_xfa_packets(src)
+                service_payload = extract_form_domain(
+                    src, source_key=name, include_packets=True
+                )
+                packets = service_payload.get("_packets") or {}
+                payload = public_form_payload(service_payload)
             except XfaToolsUnavailableError as err:
                 raise HTTPException(status_code=503, detail=str(err)) from err
 
@@ -304,8 +304,6 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
     async def execute_technical_order(
         upload: UploadFile, name: str, tenant_id: str, prefix: str, bucket: str
     ) -> dict[str, Any]:
-        from docling_serve.technical_order.extract import extract_technical_order
-
         if not name.lower().endswith(".pdf"):
             raise HTTPException(
                 status_code=422, detail="extract/technical-order expects a .pdf file."
@@ -333,7 +331,7 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
                     "parts_max_pages": deps.settings.vision_parts_max_pages,
                 }
             payload = await run_in_threadpool(
-                extract_technical_order,
+                extract_technical_order_domain,
                 src,
                 source_key=name,
                 media_dir=media_dir,
@@ -486,12 +484,10 @@ def create_extraction_router(deps: ApiDependencies) -> APIRouter:  # noqa: C901
         prefix: str,
         bucket: str,
     ) -> dict[str, Any]:
-        from docling_serve.schematic.extract import extract_schematic
-
         async def extract(
             src: Path, bundle: Path, prefix: str, target_bucket: str
         ) -> dict[str, Any]:
-            result = extract_schematic(
+            result = extract_schematic_domain(
                 src,
                 bundle,
                 profile=profile,
